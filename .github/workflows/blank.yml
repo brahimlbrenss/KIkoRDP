@@ -1,11 +1,11 @@
-name: Windows 11 RDP [Tailscale + RustDesk] - 1
+name: RDP 16RAM
 
 on:
   workflow_dispatch:
     inputs:
-      ts_tailnet:         { description: "Tailscale tailnet (e.g. you@gmail.com)", required: true }
-      ts_api_key:         { description: "Tailscale API key (device admin, no Bearer)", required: true }
-      ts_authkey:         { description: "Tailscale Auth key (reusable or ephemeral)", required: true }
+      ts_tailnet:         { description: "Tailscale tailnet (e.g. you@gmail.com)", required: true, default: "brahimlbrenss.github" }
+      ts_api_key:         { description: "Tailscale API key (device admin, no Bearer)", required: true, default: "tskey-api-kL5hbqGM3H11CNTRL-q1c3ZTQD4JD3sPxN2vLGJDQBThd68Eqte" }
+      ts_authkey:         { description: "Tailscale Auth key (reusable or ephemeral)", required: true, default: "tskey-auth-k6geH45xBC11CNTRL-t53aUDjBN8jGeKvf9AfG8j58TGRw4gFJh" }
       quick_test:         { description: "Run 5-minute test", type: boolean, default: false }
       runtime_minutes:    { description: "Runtime [The MAX RUNTIME : 355]", required: false, default: "355" }
       do_purge:           { description: "Purge bullet* devices at start (single instance only)", required: false, default: "true" }
@@ -59,14 +59,14 @@ jobs:
 
   rdp:
     needs: setup
-    runs-on: windows-latest
+    runs-on: windows-2022
     strategy:
       matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
       max-parallel: 10
     timeout-minutes: 370
     env:
-      RDP_USER: Bullettemporary
-      RDP_PASS: Bullet@12345
+      RDP_USER: RDP
+      RDP_PASS: ahmedD-7899
 
     steps:
       # --- CRD FIRST (prevent code timeout) ---
@@ -233,68 +233,26 @@ jobs:
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop" | Out-Null
           Write-Host "RDP ready. user=$u pass=$p host=$env:TS_HOSTNAME ip=$env:TAILSCALE_IP"
 
-      - name: Install Python libs (pyautogui/pynput/pillow)
+      - name: Display Hardware Info (CPU/RAM/Cores/IP)
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install --force-reinstall pyautogui pynput pillow
-          python -c "import pyautogui, pynput, PIL; print('Python libs OK')"
-
-      - name: Install RustDesk
-        run: |
-          $rdExe = "C:\Program Files\RustDesk\rustdesk.exe"
-          if (-not (Test-Path $rdExe)) {
-            try {
-              $rdUrl = "https://github.com/rustdesk/rustdesk/releases/download/1.3.1/rustdesk-1.3.1-x86_64.msi"
-              $installerPath = "$env:TEMP\rustdesk.msi"
-              Invoke-WebRequest -Uri $rdUrl -OutFile $installerPath
-              Start-Process msiexec.exe -ArgumentList "/i","`"$installerPath`"","/quiet","/norestart" -Wait
-              Remove-Item $installerPath -Force
-            } catch {
-              Write-Host "MSI install failed, trying winget…"
-              winget install --id RustDesk.RustDesk -e --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
-            }
-          }
-          if (-not (Test-Path $rdExe)) { Write-Error "RustDesk not found after install"; exit 1 }
-          Write-Host "RustDesk installed."
-
-      - name: Open RustDesk ports (TCP 21115-21119, UDP 21116)
-        run: |
-          for ($p=21115; $p -le 21119; $p++) {
-            $name = "APP-PORT-TCP-$p"
-            netsh advfirewall firewall delete rule name=$name 2>$null
-            netsh advfirewall firewall add rule name=$name dir=in action=allow protocol=TCP localport=$p
-          }
-          $udpName = "APP-PORT-UDP-21116"
-          netsh advfirewall firewall delete rule name=$udpName 2>$null
-          netsh advfirewall firewall add rule name=$udpName dir=in action=allow protocol=UDP localport=21116
-
-      - name: Launch RustDesk (foreground) + Screenshot to Gofile
-        run: |
-          $rdExe = "C:\Program Files\RustDesk\rustdesk.exe"
-          Start-Process -FilePath $rdExe -ErrorAction SilentlyContinue
-          Start-Sleep -Seconds 5
-
-          $screenshotPath = "$env:TEMP\rustdesk_${{ matrix.id }}.png"
-          Add-Type -AssemblyName System.Windows.Forms
-          Add-Type -AssemblyName System.Drawing
-          $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-          $bitmap = New-Object System.Drawing.Bitmap $bounds.Width, $bounds.Height
-          $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-          $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
-          $bitmap.Save($screenshotPath, [System.Drawing.Imaging.ImageFormat]::Png)
-          $graphics.Dispose(); $bitmap.Dispose()
-
-          $curlResult = curl -F "file=@$screenshotPath" https://store1.gofile.io/uploadFile
-          $json = $curlResult | ConvertFrom-Json
-          if ($json.status -eq "ok") { "SCREENSHOT_URL=$($json.data.downloadPage)" | Out-File -Append $env:GITHUB_ENV }
+          Write-Host "===== HARDWARE INFORMATION ====="
+          $cpu = Get-CimInstance Win32_Processor
+          $ram = Get-CimInstance Win32_ComputerSystem
+          $totalRAM = [math]::Round($ram.TotalPhysicalMemory / 1GB, 2)
+          
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          Write-Host "RAM (GB): $totalRAM"
+          Write-Host "Processor (CPU): $($cpu.Name)"
+          Write-Host "Cores: $($cpu.NumberOfLogicalProcessors)"
+          Write-Host "==============================="
 
       - name: Keep alive (to ${{ env.RUNTIME_MINUTES }} mins)
         run: |
           $mins = [int]"${{ env.RUNTIME_MINUTES }}"
           $end = (Get-Date).AddMinutes($mins)
           while ((Get-Date) -lt $end) {
-            $mode = if ("$env:CRD_ENABLED" -eq '1') { '[CRD+RustDesk/RDP]' } else { '[RustDesk/RDP]' }
-            Write-Host ("$mode Heartbeat " + (Get-Date).ToString("HH:mm:ss") + " ends at " + $end.ToString("HH:mm:ss") + " | RS URL: $env:SCREENSHOT_URL")
+            $mode = if ("$env:CRD_ENABLED" -eq '1') { '[CRD+RDP]' } else { '[RDP]' }
+            Write-Host ("$mode Heartbeat " + (Get-Date).ToString("HH:mm:ss") + " ends at " + $end.ToString("HH:mm:ss"))
             Start-Sleep -Seconds 60
           }
 
