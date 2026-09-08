@@ -1,5 +1,3 @@
-
-
 name: RDP 16RAM
 
 on:
@@ -179,6 +177,32 @@ jobs:
           if ($runtime -gt 360) { $runtime = 355 }
           "RUNTIME_MINUTES=$runtime" | Out-File -Append $env:GITHUB_ENV
           Write-Host "Hostname: $hn  | Runtime: $runtime"
+
+      # ---------- ENSURE STRONG CPU ----------
+      - name: Ensure High-Performance CPU (Reject Weak Ones like Pentium/i3)
+        run: |
+          $cpu = Get-CimInstance Win32_Processor
+          $name = $cpu.Name
+          $cores = $cpu.NumberOfCores
+          $logCores = $cpu.NumberOfLogicalProcessors
+          
+          Write-Host "Detected CPU: $name"
+          Write-Host "Physical Cores: $cores"
+          Write-Host "Logical Cores: $logCores"
+          
+          $reject = $false
+          if ($cores -lt 4) { $reject = $true; Write-Host "REJECTED: Less than 4 physical cores." }
+          if ($name -match "Pentium|Celeron|Atom|Core i3|i5") { 
+              # Allow i5 if it has >= 4 cores, but reject i3/Pentium/Celeron completely
+              if ($name -match "Pentium|Celeron|Atom|Core i3") { $reject = $true; Write-Host "REJECTED: Weak CPU family detected." }
+          }
+          
+          if ($reject) {
+              Write-Error "Aborting run: Assigned a weak CPU ($name). GitHub will reschedule on a stronger host."
+              exit 1
+          } else {
+              Write-Host "CPU is sufficiently strong. Proceeding."
+          }
 
       # ---------- PURGE only for SINGLE INSTANCE ----------
       - name: Purge bullet* devices (single-instance only)
