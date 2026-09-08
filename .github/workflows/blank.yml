@@ -179,10 +179,11 @@ jobs:
           Write-Host "Hostname: $hn  | Runtime: $runtime"
 
       # ---------- ENSURE STRONG CPU ----------
+      # ---------- ENSURE STRONG CPU ----------
       - name: Ensure High-Performance CPU (Reject Weak Ones like Pentium/i3)
         run: |
           $cpu = Get-CimInstance Win32_Processor
-          $name = $cpu.Name
+          $name = $cpu.Name.Trim()
           $cores = $cpu.NumberOfCores
           $logCores = $cpu.NumberOfLogicalProcessors
           
@@ -190,18 +191,12 @@ jobs:
           Write-Host "Physical Cores: $cores"
           Write-Host "Logical Cores: $logCores"
           
-          $reject = $false
-          if ($cores -lt 4) { $reject = $true; Write-Host "REJECTED: Less than 4 physical cores." }
-          if ($name -match "Pentium|Celeron|Atom|Core i3|i5") { 
-              # Allow i5 if it has >= 4 cores, but reject i3/Pentium/Celeron completely
-              if ($name -match "Pentium|Celeron|Atom|Core i3") { $reject = $true; Write-Host "REJECTED: Weak CPU family detected." }
-          }
-          
-          if ($reject) {
+          # Reject only known weak CPU families
+          if ($name -match "Pentium|Celeron|Atom|Core i3|i5") {
               Write-Error "Aborting run: Assigned a weak CPU ($name). GitHub will reschedule on a stronger host."
               exit 1
           } else {
-              Write-Host "CPU is sufficiently strong. Proceeding."
+              Write-Host "CPU is sufficiently strong ($name). Proceeding."
           }
 
       # ---------- PURGE only for SINGLE INSTANCE ----------
