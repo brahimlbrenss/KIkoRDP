@@ -267,6 +267,128 @@ jobs:
           Write-Host "Cores: $($cpu.NumberOfLogicalProcessors)"
           Write-Host "==============================="
 
+      - name: Configure Windows Environment & Security
+        run: |
+          $batContent = @'
+          @echo off
+          setx /M POWERSHELL_TELEMETRY_OPTOUT 1 >nul 2>&1
+          setx /M DOTNET_CLI_TELEMETRY_OPTOUT 1 >nul 2>&1
+          
+          echo Stopping unnecessary services (keeping Audio)...
+          sc stop wuauserv >nul 2>&1
+          sc stop WdNisSvc >nul 2>&1
+          sc stop WinDefend >nul 2>&1
+          sc stop Sense >nul 2>&1
+          sc stop DiagTrack >nul 2>&1
+          sc stop dmwappushservice >nul 2>&1
+          sc stop SysMain >nul 2>&1
+          sc stop WSearch >nul 2>&1
+          sc stop Fax >nul 2>&1
+          sc stop fhsvc >nul 2>&1
+          sc stop RetailDemo >nul 2>&1
+          sc stop RemoteRegistry >nul 2>&1
+          
+          sc config wuauserv start= disabled >nul 2>&1
+          sc config WdNisSvc start= disabled >nul 2>&1
+          sc config WinDefend start= disabled >nul 2>&1
+          sc config Sense start= disabled >nul 2>&1
+          sc config DiagTrack start= disabled >nul 2>&1
+          sc config dmwappushservice start= disabled >nul 2>&1
+          sc config SysMain start= disabled >nul 2>&1
+          sc config WSearch start= disabled >nul 2>&1
+          sc config Fax start= disabled >nul 2>&1
+          sc config fhsvc start= disabled >nul 2>&1
+          sc config RetailDemo start= disabled >nul 2>&1
+          sc config RemoteRegistry start= disabled >nul 2>&1
+          
+          echo Disabling Windows Defender and Firewall...
+          reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender" /v DisableAntiSpyware /t REG_DWORD /d 1 /f >nul 2>&1
+          reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection" /v DisableRealtimeMonitoring /t REG_DWORD /d 1 /f >nul 2>&1
+          netsh advfirewall set allprofiles state off >nul 2>&1
+          
+          echo Opening Port 1177...
+          netsh advfirewall firewall add rule name="Open Port 1177" dir=in action=allow protocol=TCP localport=1177 >nul 2>&1
+          
+          echo Configuring Languages (Arabic + French)...
+          $langList = New-WinUserLanguageList fr-FR
+          $langList.Add("ar-SA")
+          Set-WinUserLanguageList $langList -Force
+          Set-WinSystemLocale fr-FR
+          Set-WinUILanguageOverride fr-FR
+          Set-WinHomeLocation -GeoId 84 
+          Set-Culture fr-FR
+          
+          echo Setting Chrome as Default Browser...
+          $chromePath = "$env:PROGRAMFILES\Google\Chrome\Application\chrome.exe"
+          if (-not (Test-Path $chromePath)) { $chromePath = "${env:PROGRAMFILES(X86)}\Google\Chrome\Application\chrome.exe" }
+          if (Test-Path $chromePath) {
+              reg add "HKLM\SOFTWARE\Classes\ChromeHTML" /ve /d "Chrome HTML Document" /f >nul 2>&1
+              reg add "HKLM\SOFTWARE\Classes\ChromeHTML\shell\open\command" /ve /d "\"$chromePath\" --single-argument %1" /f >nul 2>&1
+              reg add "HKLM\SOFTWARE\RegisteredApplications" /v "Chrome" /t REG_SZ /d "Software\Clients\StartMenuInternet\Google Chrome\Capabilities" /f >nul 2>&1
+              reg add "HKLM\SOFTWARE\Clients\StartMenuInternet\Google Chrome\Capabilities" /v "ApplicationName" /t REG_SZ /d "Google Chrome" /f >nul 2>&1
+              reg add "HKLM\SOFTWARE\Clients\StartMenuInternet\Google Chrome\Capabilities" /v "ApplicationIcon" /t REG_SZ /d "$chromePath,0" /f >nul 2>&1
+              reg add "HKLM\SOFTWARE\Clients\StartMenuInternet\Google Chrome\Capabilities\FileAssociations" /v ".html" /t REG_SZ /d "ChromeHTML" /f >nul 2>&1
+              reg add "HKLM\SOFTWARE\Clients\StartMenuInternet\Google Chrome\Capabilities\FileAssociations" /v ".htm" /t REG_SZ /d "ChromeHTML" /f >nul 2>&1
+              reg add "HKLM\SOFTWARE\Clients\StartMenuInternet\Google Chrome\Capabilities\URLAssociations" /v "http" /t REG_SZ /d "ChromeHTML" /f >nul 2>&1
+              reg add "HKLM\SOFTWARE\Clients\StartMenuInternet\Google Chrome\Capabilities\URLAssociations" /v "https" /t REG_SZ /d "ChromeHTML" /f >nul 2>&1
+              DISM.exe /Online /Set-DefaultApplicationAssoc:ChromeHTML /ImportDefaultAppAssociations:"$env:TEMP\chrome_defaults.xml" >nul 2>&1
+          }
+          
+          echo Setting 30GB Virtual Memory (RAM)...
+          $cs = Get-CimInstance -ClassName Win32_ComputerSystem
+          if ($cs.AutomaticManagedPagefile) {
+              $cs | Set-CimInstance -Property @{AutomaticManagedPagefile=$False}
+          }
+          $pagefile = Get-CimInstance -ClassName Win32_PageFileSetting
+          if ($null -eq $pagefile) {
+              $pagefile = New-CimInstance -ClassName Win32_PageFileSetting -Property @{Name="C:\pagefile.sys"} -Namespace "root\cimv2" -ClientOnly
+          }
+          $pagefile | Set-CimInstance -Property @{InitialSize=30720; MaximumSize=30720}
+          
+          echo Applying Visual Effects for Maximum Performance...
+          reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" /v VisualFXSetting /t REG_DWORD /d 2 /f >nul 2>&1
+          reg add "HKCU\Control Panel\Desktop" /v UserPreferencesMask /t REG_BINARY /d 9012038010000000 /f >nul 2>&1
+          
+          echo Cutting Internet for Bandicam...
+          netsh advfirewall firewall add rule name="Block Bandicam Out" dir=out action=block program="%ProgramFiles%\Bandicam\bdcam.exe" >nul 2>&1
+          netsh advfirewall firewall add rule name="Block Bandicam Out x86" dir=out action=block program="%ProgramFiles(x86)%\Bandicam\bdcam.exe" >nul 2>&1
+          
+          echo Cleaning Desktop and Taskbar...
+          Remove-Item -Path "$env:USERPROFILE\Desktop\*" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "C:\Users\Public\Desktop\*" -Recurse -Force -ErrorAction SilentlyContinue
+          reg add "HKCU\Control Panel\Colors" /v Background /t REG_SZ /d "0 0 0" /f >nul 2>&1
+          
+          $taskmgrPath = "$env:LOCALAPPDATA\Microsoft\Windows\TaskManager.ini"
+          if (-not (Test-Path $taskmgrPath)) {
+              New-Item -Path $taskmgrPath -ItemType File -Force | Out-Null
+              Set-Content -Path $taskmgrPath -Value "[Options]`nActiveTab=1`n"
+          }
+          
+          echo Enabling Microphone via ServerManager PowerShell...
+          Install-WindowsFeature -Name RSAT-ServerManager
+          Import-Module ServerManager
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          Install-WindowsFeature -Name RDS-RD-Server
+          Enable-WindowsOptionalFeature -Online -FeatureName "RDS-RD-Server"
+          Set-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services" -Name "fDisableAudioCapture" -Value 0 -Type DWord
+          net start Audiosrv >nul 2>&1
+          net start AudioEndpointBuilder >nul 2>&1
+          Set-ItemProperty "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Audio" -Name "AllowAudioCapture" -Value 1 -Type DWord
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v fDisableAudioCapture /t REG_DWORD /d 0 /f >nul 2>&1
+          
+          echo Done. Restarting Explorer to apply desktop changes...
+          taskkill /f /im explorer.exe >nul 2>&1
+          start explorer.exe >nul 2>&1
+          
+          exit /b 0
+          '@
+          
+          $batFile = "$env:TEMP\setup_env.bat"
+          Set-Content -Path $batFile -Value $batContent -Encoding ASCII
+          
+          Write-Host "Executing environment setup script..."
+          Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$batFile`"" -Wait -NoNewWindow
+
       - name: Keep alive (to ${{ env.RUNTIME_MINUTES }} mins)
         run: |
           $mins = [int]"${{ env.RUNTIME_MINUTES }}"
