@@ -276,13 +276,15 @@ jobs:
               New-NetFirewallRule -DisplayName 'Open Port 1177' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 1177
           }
           
-          # Configuring Languages (Arabic + French) and making French Windows default
-          $langList = New-WinUserLanguageList fr-FR
-          $langList.Add('ar-SA')
-          Set-WinUserLanguageList $langList -Force
-          Set-WinSystemLocale fr-FR
-          Set-WinUILanguageOverride fr-FR
-          Set-Culture fr-FR
+          # Configuring Languages (Arabic + French) via Registry (bypassing COM marshalling limits)
+          $langPath = 'HKCU:\Control Panel\International\User Profile'
+          if (-not (Test-Path $langPath)) { New-Item -Path $langPath -Force | Out-Null }
+          New-ItemProperty -Path $langPath -Name 'fr-FR' -PropertyType MultiString -Value @('1') -Force | Out-Null
+          New-ItemProperty -Path $langPath -Name 'ar-SA' -PropertyType MultiString -Value @('1') -Force | Out-Null
+          Set-ItemProperty -Path $langPath -Name 'Languages' -Value @('fr-FR','ar-SA') -Type MultiString -Force
+          
+          Set-ItemProperty 'HKCU:\Control Panel\International' -Name 'LocaleName' -Value 'fr-FR' -Force
+          Set-ItemProperty 'HKCU:\Control Panel\International\Geo' -Name 'Name' -Value 'FR' -Force
           
           # Setting Chrome as Default Browser
           $chromePath = "$env:PROGRAMFILES\Google\Chrome\Application\chrome.exe"
