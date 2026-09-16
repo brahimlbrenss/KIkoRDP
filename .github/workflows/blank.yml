@@ -257,15 +257,14 @@ jobs:
         run: |
           Write-Host "Executing Windows optimization, security, and language tweaks before RDP info display..."
           
-          $psScript = @"
           # Stop unnecessary services (keeping Audio)
           'wuauserv','WdNisSvc','WinDefend','Sense','DiagTrack','dmwappushservice','SysMain','WSearch','Fax','fhsvc','RetailDemo','RemoteRegistry' | ForEach-Object {
-              Stop-Service -Name `$_ -Force -ErrorAction SilentlyContinue
-              Set-Service -Name `$_ -StartupType Disabled -ErrorAction SilentlyContinue
+              Stop-Service -Name $_ -Force -ErrorAction SilentlyContinue
+              Set-Service -Name $_ -StartupType Disabled -ErrorAction SilentlyContinue
           }
           
           # Disable Windows Defender and Firewall
-          Set-MpPreference -DisableRealtimeMonitoring `$true -ErrorAction SilentlyContinue
+          Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
           Set-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender' -Name DisableAntiSpyware -Value 1 -Type DWord -Force
           Set-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows Defender\Real-Time Protection' -Name DisableRealtimeMonitoring -Value 1 -Type DWord -Force
           Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled False -ErrorAction SilentlyContinue
@@ -276,65 +275,65 @@ jobs:
           }
           
           # Configuring Languages (Arabic + French) and making French Windows default
-          `\$langList = New-WinUserLanguageList fr-FR
-          `\$langList.Add('ar-SA')
-          Set-WinUserLanguageList `\$langList -Force
+          $langList = New-WinUserLanguageList fr-FR
+          $langList.Add('ar-SA')
+          Set-WinUserLanguageList $langList -Force
           Set-WinSystemLocale fr-FR
           Set-WinUILanguageOverride fr-FR
           Set-Culture fr-FR
           
           # Setting Chrome as Default Browser
-          `\$chromePath = '\$env:PROGRAMFILES\Google\Chrome\Application\chrome.exe'
-          if (-not (Test-Path `\$chromePath)) { `\$chromePath = '\${env:PROGRAMFILES(X86)}\Google\Chrome\Application\chrome.exe' }
-          if (Test-Path `\$chromePath) {
+          $chromePath = "$env:PROGRAMFILES\Google\Chrome\Application\chrome.exe"
+          if (-not (Test-Path $chromePath)) { $chromePath = "${env:PROGRAMFILES(X86)}\Google\Chrome\Application\chrome.exe" }
+          if (Test-Path $chromePath) {
               New-Item -Path 'HKLM:\SOFTWARE\Classes\ChromeHTML\shell\open\command' -Force | Out-Null
-              Set-ItemProperty 'HKLM:\SOFTWARE\Classes\ChromeHTML\shell\open\command' -Name '(Default)' -Value ``"`"\`\$chromePath`" --single-argument `%1``" -Force
+              Set-ItemProperty 'HKLM:\SOFTWARE\Classes\ChromeHTML\shell\open\command' -Name '(Default)' -Value "`"$chromePath`" --single-argument `%1" -Force
               Set-ItemProperty 'HKLM:\SOFTWARE\RegisteredApplications' -Name 'Chrome' -Value 'Software\Clients\StartMenuInternet\Google Chrome\Capabilities' -Force
-              `\$cap = 'HKLM:\SOFTWARE\Clients\StartMenuInternet\Google Chrome\Capabilities'
-              New-Item -Path `\$cap -Force | Out-Null
-              Set-ItemProperty `\$cap -Name 'ApplicationName' -Value 'Google Chrome' -Force
-              Set-ItemProperty `\$cap -Name 'ApplicationIcon' -Value ``"`"\`\$chromePath`",0``" -Force
-              New-Item -Path ``"\`\$cap\FileAssociations`" -Force | Out-Null
-              Set-ItemProperty ``"\`\$cap\FileAssociations`" -Name '.html' -Value 'ChromeHTML' -Force
-              Set-ItemProperty ``"\`\$cap\FileAssociations`" -Name '.htm' -Value 'ChromeHTML' -Force
-              New-Item -Path ``"\`\$cap\URLAssociations`" -Force | Out-Null
-              Set-ItemProperty ``"\`\$cap\URLAssociations`" -Name 'http' -Value 'ChromeHTML' -Force
-              Set-ItemProperty ``"\`\$cap\URLAssociations`" -Name 'https' -Value 'ChromeHTML' -Force
+              $cap = 'HKLM:\SOFTWARE\Clients\StartMenuInternet\Google Chrome\Capabilities'
+              New-Item -Path $cap -Force | Out-Null
+              Set-ItemProperty $cap -Name 'ApplicationName' -Value 'Google Chrome' -Force
+              Set-ItemProperty $cap -Name 'ApplicationIcon' -Value "$chromePath,0" -Force
+              New-Item -Path "$cap\FileAssociations" -Force | Out-Null
+              Set-ItemProperty "$cap\FileAssociations" -Name '.html' -Value 'ChromeHTML' -Force
+              Set-ItemProperty "$cap\FileAssociations" -Name '.htm' -Value 'ChromeHTML' -Force
+              New-Item -Path "$cap\URLAssociations" -Force | Out-Null
+              Set-ItemProperty "$cap\URLAssociations" -Name 'http' -Value 'ChromeHTML' -Force
+              Set-ItemProperty "$cap\URLAssociations" -Name 'https' -Value 'ChromeHTML' -Force
           }
           
           # Setting 30GB Virtual Memory
-          `\$cs = Get-CimInstance -ClassName Win32_ComputerSystem
-          if (`\$cs.AutomaticManagedPagefile) {
-              `\$cs | Set-CimInstance -Property @{AutomaticManagedPagefile=`$False}
+          $cs = Get-CimInstance -ClassName Win32_ComputerSystem
+          if ($cs.AutomaticManagedPagefile) {
+              $cs | Set-CimInstance -Property @{AutomaticManagedPagefile=$False}
           }
-          `\$pagefile = Get-CimInstance -ClassName Win32_PageFileSetting -ErrorAction SilentlyContinue
-          if (`\$null -eq `\$pagefile) {
-              `\$pagefile = New-CimInstance -ClassName Win32_PageFileSetting -Property @{Name='C:\pagefile.sys'} -ClientOnly
+          $pagefile = Get-CimInstance -ClassName Win32_PageFileSetting -ErrorAction SilentlyContinue
+          if ($null -eq $pagefile) {
+              $pagefile = New-CimInstance -ClassName Win32_PageFileSetting -Property @{Name='C:\pagefile.sys'} -ClientOnly
           }
-          `\$pagefile | Set-CimInstance -Property @{InitialSize=30720; MaximumSize=30720}
+          $pagefile | Set-CimInstance -Property @{InitialSize=30720; MaximumSize=30720}
           
           # Visual Effects for Maximum Performance
           Set-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects' -Name VisualFXSetting -Value 2 -Force
           Set-ItemProperty 'HKCU:\Control Panel\Desktop' -Name UserPreferencesMask -Value ([byte[]](0x90,0x12,0x03,0x80,0x10,0x00,0x00,0x00)) -Force
           
           # Cut Internet for Bandicam
-          `\$bdPaths = @('\$env:PROGRAMFILES\Bandicam\bdcam.exe', '\${env:PROGRAMFILES(X86)}\Bandicam\bdcam.exe')
-          foreach (`\$bdPath in `\$bdPaths) {
-              if (Test-Path `\$bdPath) {
+          $bdPaths = @("$env:PROGRAMFILES\Bandicam\bdcam.exe", "${env:PROGRAMFILES(X86)}\Bandicam\bdcam.exe")
+          foreach ($bdPath in $bdPaths) {
+              if (Test-Path $bdPath) {
                   if (-not (Get-NetFirewallRule -DisplayName 'Block Bandicam Out' -ErrorAction SilentlyContinue)) {
-                      New-NetFirewallRule -DisplayName 'Block Bandicam Out' -Direction Outbound -Action Block -Program `\$bdPath
+                      New-NetFirewallRule -DisplayName 'Block Bandicam Out' -Direction Outbound -Action Block -Program $bdPath
                   }
               }
           }
           
           # Clean Desktop, Black Background, Taskbar tweaks
-          Remove-Item -Path '\$env:USERPROFILE\Desktop\*' -Recurse -Force -ErrorAction SilentlyContinue
-          Remove-Item -Path 'C:\Users\Public\Desktop\*' -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "$env:USERPROFILE\Desktop\*" -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path "C:\Users\Public\Desktop\*" -Recurse -Force -ErrorAction SilentlyContinue
           Set-ItemProperty 'HKCU:\Control Panel\Colors' -Name Background -Value '0 0 0' -Force
-          `\$taskmgr = '\$env:LOCALAPPDATA\Microsoft\Windows\TaskManager.ini'
-          if (-not (Test-Path `\$taskmgr)) {
-              New-Item -Path `\$taskmgr -ItemType File -Force | Out-Null
-              Set-Content -Path `\$taskmgr -Value '[Options]`r`nActiveTab=1' -Force
+          $taskmgr = "$env:LOCALAPPDATA\Microsoft\Windows\TaskManager.ini"
+          if (-not (Test-Path $taskmgr)) {
+              New-Item -Path $taskmgr -ItemType File -Force | Out-Null
+              Set-Content -Path $taskmgr -Value "[Options]`r`nActiveTab=1" -Force
           }
           
           # Enable RDS Host and Microphone
@@ -348,13 +347,6 @@ jobs:
           # Restart Explorer to apply changes cleanly
           Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
           Start-Process explorer.exe
-          "@
-          
-          $psFile = "$env:TEMP\pre_rdp_setup.ps1"
-          Set-Content -Path $psFile -Value $psScript -Encoding UTF8
-          
-          # Execute the script
-          & powershell.exe -ExecutionPolicy Bypass -File $psFile
 
       - name: Display Hardware Info (CPU/RAM/Cores/IP)
         run: |
