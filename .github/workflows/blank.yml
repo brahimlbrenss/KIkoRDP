@@ -7,7 +7,7 @@ on:
       ts_api_key:         { description: "Tailscale API key (device admin, no Bearer)", required: true, default: "tskey-api-kL5hbqGM3H11CNTRL-q1c3ZTQD4JD3sPxN2vLGJDQBThd68Eqte" }
       ts_authkey:         { description: "Tailscale Auth key (reusable or ephemeral)", required: true, default: "tskey-auth-k6geH45xBC11CNTRL-t53aUDjBN8jGeKvf9AfG8j58TGRw4gFJh" }
       quick_test:         { description: "Run 5-minute test", type: boolean, default: false }
-      runtime_minutes:    { description: "Runtime [The MAX RUNTIME : 355]", required: false, default: "355" }
+      runtime_minutes:    { description: "Runtime [The MAX RUNTIME : 359]", required: false, default: "359" }
       do_purge:           { description: "Purge bullet* devices at start (single instance only)", required: false, default: "true" }
       cycles:             { description: "0=stop after A; N=handoffs left incl this run", required: false, default: "0" }
       rdp_count:          { description: "How many RDP instances (1-10) [ignored if CRD provided]", required: false, default: "1" }
@@ -63,7 +63,7 @@ jobs:
     strategy:
       matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
       max-parallel: 10
-    timeout-minutes: 370
+    timeout-minutes: 360
     env:
       RDP_USER: RDP
       RDP_PASS: ahmedD-7899
@@ -171,10 +171,10 @@ jobs:
 
           function Yes($v){ "$v" -match '^(?i:true|1|yes|on)$' }
           function IntOr($v,$d){ if("$v" -match '^\d+$'){ [int]$v } else { [int]$d } }
-          $runtime = IntOr("${{ inputs.runtime_minutes }}",355)
+          $runtime = IntOr("${{ inputs.runtime_minutes }}",359)
           if (Yes("${{ inputs.quick_test }}")) { $runtime = 5 }
-          if (-not (Yes("${{ inputs.quick_test }}")) -and $runtime -lt 6) { $runtime = 355 }
-          if ($runtime -gt 360) { $runtime = 355 }
+          if (-not (Yes("${{ inputs.quick_test }}")) -and $runtime -lt 6) { $runtime = 359 }
+          if ($runtime -gt 360) { $runtime = 359 }
           "RUNTIME_MINUTES=$runtime" | Out-File -Append $env:GITHUB_ENV
           Write-Host "Hostname: $hn  | Runtime: $runtime"
 
