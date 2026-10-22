@@ -366,52 +366,60 @@ jobs:
           Set-ItemProperty -Path $tsPath -Name "fEnableWindowsKey"                -Type DWord -Value 1 -Force
           Write-Host "RDP-Tcp policies applied (SecurityLayer=RDP, NLA off, channels pruned)."
 
+          # WMI: skip UserAuthenticationRequired (readonly), only set SecurityLayer + MinEncryptionLevel
           try {
             $t = Get-CimInstance -ClassName "Win32_TSGeneralSetting" -Namespace "root\cimv2\TerminalServices" -Filter "TerminalName='RDP-Tcp'"
             if ($t) {
-              Set-CimInstance -InputObject $t -Property @{ SecurityLayer = 1; UserAuthenticationRequired = $false; MinEncryptionLevel = 1 } -ErrorAction SilentlyContinue
+              Set-CimInstance -InputObject $t -Property @{ SecurityLayer = 1; MinEncryptionLevel = 1 } -ErrorAction SilentlyContinue
             }
           } catch { Write-Host "WMI RDP-Tcp tune skipped: $($_.Exception.Message)" }
 
-          $tuneHive = {
-            param($root)
+          # --- Tune user hives via reg CLI (no PSDrive needed) ---
+          function Set-RegVal {
+            param([string]$Path, [string]$Name, [string]$Type, [string]$Value)
+            & reg add "$Path" /v "$Name" /t "$Type" /d "$Value" /f | Out-Null
+          }
+
+          function Tune-Hive {
+            param([string]$Hive)  # e.g. "HKU\DefTune"
+            $root = $Hive
+            # VisualEffects
+            Set-RegVal "$root\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" "VisualFXSetting" "REG_DWORD" "2"
+            # Desktop
             $desk = "$root\Control Panel\Desktop"
-            $metr = "$root\Control Panel\Desktop\WindowMetrics"
-            $vx   = "$root\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects"
-            New-Item -Path $vx -Force | Out-Null
-            Set-ItemProperty -Path $vx -Name "VisualFXSetting" -Type DWord -Value 2 -Force
-            Set-ItemProperty -Path $desk -Name "UserPreferencesMask" -Type Binary -Value ([byte[]](0x90,0x12,0x01,0x80)) -Force
-            Set-ItemProperty -Path $desk -Name "DragFullWindows"  -Type String -Value "0" -Force
-            Set-ItemProperty -Path $desk -Name "FontSmoothing"    -Type String -Value "0" -Force
-            Set-ItemProperty -Path $desk -Name "MenuShowDelay"    -Type String -Value "0" -Force
-            Set-ItemProperty -Path $desk -Name "SmoothScroll"     -Type DWord -Value 0 -Force
-            Set-ItemProperty -Path $metr -Name "MinAnimate"       -Type String -Value "0" -Force
+            Set-RegVal $desk "DragFullWindows" "REG_SZ" "0"
+            Set-RegVal $desk "FontSmoothing"   "REG_SZ" "0"
+            Set-RegVal $desk "MenuShowDelay"   "REG_SZ" "0"
+            Set-RegVal $desk "SmoothScroll"    "REG_DWORD" "0"
+            # UserPreferencesMask as binary via reg add (hex format)
+            & reg add "$desk" /v "UserPreferencesMask" /t REG_BINARY /d "90120180" /f | Out-Null
+            # WindowMetrics
+            Set-RegVal "$root\Control Panel\Desktop\WindowMetrics" "MinAnimate" "REG_SZ" "0"
+            # Explorer\Advanced
             $adv = "$root\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
-            New-Item -Path $adv -Force | Out-Null
-            Set-ItemProperty -Path $adv -Name "ListviewAlphaSelect"   -Type DWord -Value 0 -Force
-            Set-ItemProperty -Path $adv -Name "TaskbarAnimations"     -Type DWord -Value 0 -Force
-            Set-ItemProperty -Path $adv -Name "IconsOnly"             -Type DWord -Value 1 -Force
-            Set-ItemProperty -Path $adv -Name "DisablePreviewDesktop" -Type DWord -Value 1 -Force
-            $dwm = "$root\Software\Microsoft\Windows\DWM"
-            New-Item -Path $dwm -Force | Out-Null
-            Set-ItemProperty -Path $dwm -Name "EnableAeroPeek" -Type DWord -Value 0 -Force
+            Set-RegVal $adv "ListviewAlphaSelect"   "REG_DWORD" "0"
+            Set-RegVal $adv "TaskbarAnimations"     "REG_DWORD" "0"
+            Set-RegVal $adv "IconsOnly"             "REG_DWORD" "1"
+            Set-RegVal $adv "DisablePreviewDesktop" "REG_DWORD" "1"
+            # DWM
+            Set-RegVal "$root\Software\Microsoft\Windows\DWM" "EnableAeroPeek" "REG_DWORD" "0"
           }
 
           $defNt = "C:\Users\Default\NTUSER.DAT"
           if (Test-Path $defNt) {
-            reg load "HKU\DefTune" $defNt | Out-Null
-            & $tuneHive "HKU:\DefTune"
+            & reg load "HKU\DefTune" $defNt | Out-Null
+            Tune-Hive "HKU\DefTune"
             [gc]::Collect()
-            reg unload "HKU\DefTune" | Out-Null
+            & reg unload "HKU\DefTune" | Out-Null
             Write-Host "Default user profile tuned."
           }
 
           $rdpNt = "C:\Users\$env:RDP_USER\NTUSER.DAT"
           if (Test-Path $rdpNt) {
-            reg load "HKU\RdpTune" $rdpNt | Out-Null
-            & $tuneHive "HKU:\RdpTune"
+            & reg load "HKU\RdpTune" $rdpNt | Out-Null
+            Tune-Hive "HKU\RdpTune"
             [gc]::Collect()
-            reg unload "HKU\RdpTune" | Out-Null
+            & reg unload "HKU\RdpTune" | Out-Null
             Write-Host "RDP user profile tuned."
           }
 
