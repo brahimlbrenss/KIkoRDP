@@ -92,7 +92,6 @@ jobs:
     timeout-minutes: 360
     env:
       RDP_USER: RDP
-      RDP_PASS: ahmedD-7899
 
     steps:
       - name: Set CRD flag early
@@ -324,24 +323,42 @@ jobs:
           & $ts netcheck
           Write-Host "============================="
 
-      - name: Enable RDP user + firewall
+      - name: Enable RDP user (no password) + firewall + blank-password logon
         run: |
           $u = $env:RDP_USER
-          $p = $env:RDP_PASS
-          $sec = ConvertTo-SecureString $p -AsPlainText -Force
+
+          # Create user with empty password
           if (-not (Get-LocalUser -Name $u -ErrorAction SilentlyContinue)) {
-            New-LocalUser -Name $u -Password $sec -AccountNeverExpires
-            Add-LocalGroupMember -Group "Administrators" -Member $u
-            Add-LocalGroupMember -Group "Remote Desktop Users" -Member $u
+            New-LocalUser -Name $u -NoPassword -AccountNeverExpires -Description "RDP access user (no password)"
           } else {
-            Set-LocalUser -Name $u -Password $sec -AccountNeverExpires
             Enable-LocalUser -Name $u
-            Add-LocalGroupMember -Group "Administrators" -Member $u -ErrorAction SilentlyContinue
-            Add-LocalGroupMember -Group "Remote Desktop Users" -Member $u -ErrorAction SilentlyContinue
+            # Clear any existing password -> set to empty
+            try {
+              $uObj = [ADSI]"WinNT://./$u,user"
+              $uObj.SetPassword("")
+              $uObj.SetInfo()
+            } catch { Write-Host "Clear password skipped: $($_.Exception.Message)" }
           }
+
+          Add-LocalGroupMember -Group "Administrators" -Member $u -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $u -ErrorAction SilentlyContinue
+
+          # Enable RDP
           Set-ItemProperty "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name fDenyTSConnections -Value 0
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop" | Out-Null
-          Write-Host "RDP ready. user=$u pass=$p host=$env:TS_HOSTNAME ip=$env:TAILSCALE_IP"
+
+          # Allow blank passwords for network logon (RDP)
+          # 1) LSA policy
+          $lsaPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa"
+          Set-ItemProperty -Path $lsaPath -Name "LimitBlankPasswordUse" -Type DWord -Value 0 -Force
+
+          # 2) Group Policy equivalent (Terminal Services)
+          $tsPolPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
+          if (-not (Test-Path $tsPolPath)) { New-Item -Path $tsPolPath -Force | Out-Null }
+          # fPromptForPassword = 0 -> don't prompt, allow blank
+          Set-ItemProperty -Path $tsPolPath -Name "fPromptForPassword" -Type DWord -Value 0 -Force
+
+          Write-Host "RDP ready. user=$u (no password) host=$env:TS_HOSTNAME ip=$env:TAILSCALE_IP"
 
       - name: Apply RDP Performance Tuning
         run: |
@@ -364,9 +381,10 @@ jobs:
           Set-ItemProperty -Path $tsPath -Name "fDisableCcm"                      -Type DWord -Value 1 -Force
           Set-ItemProperty -Path $tsPath -Name "fDisableLPT"                      -Type DWord -Value 1 -Force
           Set-ItemProperty -Path $tsPath -Name "fEnableWindowsKey"                -Type DWord -Value 1 -Force
-          Write-Host "RDP-Tcp policies applied (SecurityLayer=RDP, NLA off, channels pruned)."
+          Set-ItemProperty -Path $tsPath -Name "fPromptForPassword"               -Type DWord -Value 0 -Force
+          Write-Host "RDP-Tcp policies applied (SecurityLayer=RDP, NLA off, blank password allowed, channels pruned)."
 
-          # WMI: skip UserAuthenticationRequired (readonly), only set SecurityLayer + MinEncryptionLevel
+          # WMI: skip UserAuthenticationRequired (readonly)
           try {
             $t = Get-CimInstance -ClassName "Win32_TSGeneralSetting" -Namespace "root\cimv2\TerminalServices" -Filter "TerminalName='RDP-Tcp'"
             if ($t) {
@@ -381,27 +399,21 @@ jobs:
           }
 
           function Tune-Hive {
-            param([string]$Hive)  # e.g. "HKU\DefTune"
+            param([string]$Hive)
             $root = $Hive
-            # VisualEffects
             Set-RegVal "$root\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" "VisualFXSetting" "REG_DWORD" "2"
-            # Desktop
             $desk = "$root\Control Panel\Desktop"
             Set-RegVal $desk "DragFullWindows" "REG_SZ" "0"
             Set-RegVal $desk "FontSmoothing"   "REG_SZ" "0"
             Set-RegVal $desk "MenuShowDelay"   "REG_SZ" "0"
             Set-RegVal $desk "SmoothScroll"    "REG_DWORD" "0"
-            # UserPreferencesMask as binary via reg add (hex format)
             & reg add "$desk" /v "UserPreferencesMask" /t REG_BINARY /d "90120180" /f | Out-Null
-            # WindowMetrics
             Set-RegVal "$root\Control Panel\Desktop\WindowMetrics" "MinAnimate" "REG_SZ" "0"
-            # Explorer\Advanced
             $adv = "$root\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
             Set-RegVal $adv "ListviewAlphaSelect"   "REG_DWORD" "0"
             Set-RegVal $adv "TaskbarAnimations"     "REG_DWORD" "0"
             Set-RegVal $adv "IconsOnly"             "REG_DWORD" "1"
             Set-RegVal $adv "DisablePreviewDesktop" "REG_DWORD" "1"
-            # DWM
             Set-RegVal "$root\Software\Microsoft\Windows\DWM" "EnableAeroPeek" "REG_DWORD" "0"
           }
 
@@ -492,7 +504,7 @@ jobs:
           Write-Host "RAM (GB): $totalRAM"
           Write-Host "Processor (CPU): $($cpu.Name)"
           Write-Host "Cores: $($cpu.NumberOfLogicalProcessors)"
-          Write-Host "RDP Target: $env:TAILSCALE_IP:3389  user=$env:RDP_USER"
+          Write-Host "RDP Target: $env:TAILSCALE_IP:3389  user=$env:RDP_USER (no password)"
           Write-Host "==============================="
 
       - name: Keep alive
