@@ -3,44 +3,22 @@ name: RDP 16RAM
 on:
   workflow_dispatch:
     inputs:
-      ts_tailnet:
-        description: "Tailscale tailnet (e.g. you@gmail.com)"
-        required: true
-        default: "brahimlbrenss.github"
-      ts_api_key:
-        description: "Tailscale API key (device admin, no Bearer)"
-        required: true
-        default: "tskey-api-kroYEtuGFB21CNTRL-cZXDWpMQP4QcSLNcKA8X4QcwjUhuwU41"
-      ts_authkey:
-        description: "Tailscale Auth key (reusable or ephemeral)"
-        required: true
-        default: "tskey-auth-kxup96o8Hf11CNTRL-Njw8q82nUpjCwreTYU3MpjtazQP9SYy4G"
-      quick_test:
-        description: "Run 5-minute test"
-        type: boolean
-        default: false
-      runtime_minutes:
-        description: "Runtime [MAX: 359]"
-        required: false
-        default: "359"
-      do_purge:
-        description: "Purge bullet* devices at start (single instance only)"
-        required: false
-        default: "true"
-      cycles:
-        description: "0=stop after A; N=handoffs left incl this run"
-        required: false
-        default: "0"
-      rdp_count:
-        description: "How many RDP instances (1-10) [ignored if CRD provided]"
-        required: false
-        default: "1"
+      ts_tailnet:         { description: "Tailscale tailnet (e.g. you@gmail.com)", required: true, default: "brahimlbrenss.github" }
+      ts_api_key:         { description: "Tailscale API key (device admin, no Bearer)", required: true, default: "tskey-api-kroYEtuGFB21CNTRL-cZXDWpMQP4QcSLNcKA8X4QcwjUhuwU41" }
+      ts_authkey:         { description: "Tailscale Auth key (reusable or ephemeral)", required: true, default: "tskey-auth-kxup96o8Hf11CNTRL-Njw8q82nUpjCwreTYU3MpjtazQP9SYy4G" }
+      quick_test:         { description: "Run 5-minute test", type: boolean, default: false }
+      runtime_minutes:    { description: "Runtime [The MAX RUNTIME : 359]", required: false, default: "359" }
+      do_purge:           { description: "Purge bullet* devices at start (single instance only)", required: false, default: "true" }
+      cycles:             { description: "0=stop after A; N=handoffs left incl this run", required: false, default: "0" }
+      rdp_count:          { description: "How many RDP instances (1-10) [ignored if CRD provided]", required: false, default: "1" }
       crd_code:
-        description: 'Paste raw CRD code (4/0AV...), full PowerShell command, or text/URL containing --code="4/...". If provided -> single instance; CRD launches first.'
+        description: >-
+          Paste raw CRD code (4/0AV...), full PowerShell command, or text/URL containing --code="4/...".
+          If provided -> single instance; CRD launches first.
         required: false
         default: ""
       crd_pin:
-        description: "CRD PIN (6-12 digits). Used when launching CRD to avoid interactive prompt."
+        description: "CRD PIN (6–12 digits). Used when launching CRD to avoid interactive prompt."
         required: false
         default: "123456"
 
@@ -60,28 +38,21 @@ jobs:
       multi:  ${{ steps.mk.outputs.multi }}
     steps:
       - id: mk
-        env:
-          CRD_CODE: ${{ inputs.crd_code }}
-          RDP_COUNT: ${{ inputs.rdp_count }}
         run: |
-          $crd = "$env:CRD_CODE".Trim()
-          if ($crd.Length -gt 0) {
-            $n = 1
-          } else {
-            $n = [int]"$env:RDP_COUNT"
-            if ($n -lt 1) { $n = 1 }
-            if ($n -gt 10) { $n = 10 }
+          $crd = @'
+          ${{ inputs.crd_code }}
+          '@.Trim()
+
+          if ($crd.Length -gt 0) { $n = 1 } else {
+            $n = [int]"${{ inputs.rdp_count }}"; if ($n -lt 1) { $n = 1 }; if ($n -gt 10) { $n = 10 }
           }
 
-          $inc = @()
-          for ($i = 1; $i -le $n; $i++) {
-            $inc += @{ id = $i }
-          }
+          $inc = @(); for ($i=1; $i -le $n; $i++){ $inc += @{ id = $i } }
           $json = @{ include = $inc } | ConvertTo-Json -Compress
-          "matrix=$json" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "matrix=$json" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
 
           $multi = if ($n -gt 1) { '1' } else { '0' }
-          "multi=$multi" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "multi=$multi" | Out-File $env:GITHUB_OUTPUT -Append -Encoding utf8
 
   rdp:
     needs: setup
@@ -92,18 +63,15 @@ jobs:
     timeout-minutes: 360
     env:
       RDP_USER: RDP
+      RDP_PASS: ahmedD-7899
 
     steps:
-      - name: Set CRD flag early
-        env:
-          CRD_CODE: ${{ inputs.crd_code }}
+      - name: Set CRD flag early (safe read)
         run: |
-          $crd = "$env:CRD_CODE".Trim()
-          if ($crd.Length -gt 0) {
-            "CRD_ENABLED=1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          } else {
-            "CRD_ENABLED=0" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          }
+          $crd = @'
+          ${{ inputs.crd_code }}
+          '@.Trim()
+          if ($crd.Length -gt 0) { "CRD_ENABLED=1" | Out-File -Append $env:GITHUB_ENV } else { "CRD_ENABLED=0" | Out-File -Append $env:GITHUB_ENV }
           Write-Host "CRD_ENABLED=$([int]($crd.Length -gt 0))"
 
       - name: Install Chrome Remote Desktop Host (if missing)
@@ -111,7 +79,6 @@ jobs:
         run: |
           $exe = "${Env:PROGRAMFILES(X86)}\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe"
           if (-not (Test-Path $exe)) {
-            Write-Host "CRD host not found, attempting install (EXE -> MSI fallback)..."
             $exePath = "$env:TEMP\chromeremotedesktophost.exe"
             $ok = $false
             try {
@@ -133,174 +100,58 @@ jobs:
                 exit 1
               }
             }
-          } else {
-            Write-Host "CRD host already installed."
           }
 
       - name: Run Chrome Remote Desktop with PIN
         if: env.CRD_ENABLED == '1'
-        env:
-          CRD_CODE: ${{ inputs.crd_code }}
-          CRD_PIN: ${{ inputs.crd_pin }}
         run: |
-          $raw = "$env:CRD_CODE".Trim()
-          $pin = "$env:CRD_PIN".Trim()
-          if ($pin -notmatch '^\d{6,12}$') {
-            Write-Error "crd_pin must be 6-12 digits."
-            exit 1
-          }
+          $raw = @'
+          ${{ inputs.crd_code }}
+          '@.Trim()
+          $pin = "${{ inputs.crd_pin }}".Trim()
+          if ($pin -notmatch '^\d{6,12}$') { Write-Error "crd_pin must be 6–12 digits."; exit 1 }
 
           $starter = "${Env:PROGRAMFILES(X86)}\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe"
-          if (-not (Test-Path $starter)) {
-            Write-Error "remoting_start_host.exe not found."
-            exit 1
-          }
-
-          $isFull = $false
-          $code = $null
-          if ($raw -match 'remoting_start_host\.exe') { $isFull = $true }
-          if ($raw -match '--code\s*=\s*"?([^"\s]+)') {
-            $code = ([regex]::Match($raw,'--code\s*=\s*"?([^"\s]+)')).Groups[1].Value
-          } elseif ($raw -match '^4\/') {
-            $code = $raw
-          }
-
-          if ($code) {
-            $redir = "https://remotedesktop.google.com/_/oauthredirect"
-            $name  = $Env:COMPUTERNAME
-            $args  = @("--code=`"$code`"","--redirect-url=`"$redir`"","--name=`"$name`"","--pin=`"$pin`"")
-            Start-Process -FilePath $starter -ArgumentList $args
-          } elseif ($isFull) {
-            $tmp = "$env:TEMP\crd_full.ps1"
-            Set-Content -Path $tmp -Value $raw -Encoding UTF8
-            powershell -ExecutionPolicy Bypass -File $tmp
-          } else {
-            Write-Error "Could not detect CRD code. Provide raw code (4/...), full command, or string containing --code=`"4/...`""
-            exit 1
-          }
-          Write-Host "CRD launch step completed with PIN."
-
-      - name: Verify CRD registration
-        if: env.CRD_ENABLED == '1'
-        run: |
-          $svcName = "Chrome Remote Desktop Service"
-          $deadline = (Get-Date).AddSeconds(60)
-          $ok = $false
-          while ((Get-Date) -lt $deadline) {
-            $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
-            if ($svc -and $svc.Status -in 'Running','StartPending') { $ok = $true; break }
-            Start-Sleep -Seconds 3
-          }
-          if ($ok) {
-            Write-Host "[$svcName] status: Running or starting."
-          } else {
-            Write-Warning "[$svcName] not running yet."
-          }
-
-          $logDir = "$env:ProgramData\Google\Chrome Remote Desktop"
-          if (Test-Path $logDir) {
-            Get-ChildItem $logDir -Filter "host*.log" |
-              Sort-Object LastWriteTime -Descending |
-              Select-Object -First 2 |
-              ForEach-Object {
-                Write-Host "----- LOG: $($_.FullName) -----"
-                Get-Content $_.FullName -Tail 200
-              }
-          } else {
-            Write-Host "CRD log directory not found: $logDir"
-          }
+          $redir = "https://remotedesktop.google.com/_/oauthredirect"
+          $name  = $Env:COMPUTERNAME
+          $args  = @("--code=""$raw""","--redirect-url=""$redir""","--name=""$name""","--pin=""$pin""")
+          Start-Process -FilePath $starter -ArgumentList $args
 
       - name: Decide hostname + runtime
-        env:
-          RDP_COUNT: ${{ inputs.rdp_count }}
-          RUNTIME_MIN: ${{ inputs.runtime_minutes }}
-          QUICK_TEST: ${{ inputs.quick_test }}
         run: |
-          if ([int]"$env:RDP_COUNT" -gt 1) {
-            $hn = "bullet${{ matrix.id }}"
-          } else {
-            $hn = "bullet"
-          }
-          "TS_HOSTNAME=$hn" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          if ("${{ inputs.rdp_count }}" -gt 1) { $hn = "bullet${{ matrix.id }}" } else { $hn = "bullet" }
+          "TS_HOSTNAME=$hn" | Out-File -Append $env:GITHUB_ENV
 
           function Yes($v){ "$v" -match '^(?i:true|1|yes|on)$' }
           function IntOr($v,$d){ if("$v" -match '^\d+$'){ [int]$v } else { [int]$d } }
-          $runtime = IntOr("$env:RUNTIME_MIN", 359)
-          if (Yes("$env:QUICK_TEST")) { $runtime = 5 }
-          if (-not (Yes("$env:QUICK_TEST")) -and $runtime -lt 6) { $runtime = 359 }
+          $runtime = IntOr("${{ inputs.runtime_minutes }}",359)
+          if (Yes("${{ inputs.quick_test }}")) { $runtime = 5 }
+          if (-not (Yes("${{ inputs.quick_test }}")) -and $runtime -lt 6) { $runtime = 359 }
           if ($runtime -gt 360) { $runtime = 359 }
-          "RUNTIME_MINUTES=$runtime" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          Write-Host "Hostname: $hn  | Runtime: $runtime"
+          "RUNTIME_MINUTES=$runtime" | Out-File -Append $env:GITHUB_ENV
 
       - name: Ensure High-Performance CPU
         run: |
           $cpu = Get-CimInstance Win32_Processor
           $name = $cpu.Name.Trim()
-          $cores = $cpu.NumberOfCores
-          $logCores = $cpu.NumberOfLogicalProcessors
-
-          Write-Host "Detected CPU: $name"
-          Write-Host "Physical Cores: $cores"
-          Write-Host "Logical Cores: $logCores"
-
           if ($name -match "Pentium|Celeron|Atom|Core i3|i5") {
-              Write-Error "Aborting run: Assigned a weak CPU ($name). GitHub will reschedule on a stronger host."
-              exit 1
-          } else {
-              Write-Host "CPU is sufficiently strong ($name). Proceeding."
-          }
-
-      - name: Ensure 16GB+ RAM
-        run: |
-          $ram = Get-CimInstance Win32_ComputerSystem
-          $totalRAM = [math]::Round($ram.TotalPhysicalMemory / 1GB, 2)
-          Write-Host "Detected RAM: $totalRAM GB"
-          if ($totalRAM -lt 14) {
-              Write-Error "Aborting run: Only $totalRAM GB RAM assigned. GitHub will reschedule on a 16GB+ host."
+              Write-Error "Aborting run: Assigned a weak CPU ($name)."
               exit 1
           }
-          Write-Host "RAM OK ($totalRAM GB). Proceeding."
 
-      - name: Force High-Performance Power Plan + Disable Sleep/Idle
+      - name: Optimize Windows Performance & UI Responsiveness (Fix Lag)
         run: |
-          $hp = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"
-          powercfg -setactive $hp
-          powercfg -change -monitor-timeout-ac 0
-          powercfg -change -standby-timeout-ac 0
-          powercfg -change -disk-timeout-ac 0
-          powercfg -change -hibernate-timeout-ac 0
-          powercfg -change -monitor-timeout-dc 0
-          powercfg -change -standby-timeout-dc 0
-          powercfg -hibernate off
-          Write-Host "Power plan: High Performance. All sleep/idle timers = 0."
-
-      - name: Purge bullet* devices (single-instance only)
-        if: ${{ needs.setup.outputs.multi == '0' }}
-        env:
-          TS_TAILNET: ${{ inputs.ts_tailnet }}
-          TS_API_KEY: ${{ inputs.ts_api_key }}
-          DO_PURGE: ${{ inputs.do_purge }}
-        run: |
-          function Yes($v){ "$v" -match '^(?i:true|1|yes|on)$' }
-          if (Yes("$env:DO_PURGE")) {
-            try {
-              $auth = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("$($env:TS_API_KEY):"))
-              $tn = [uri]::EscapeDataString("$env:TS_TAILNET")
-              $list = Invoke-RestMethod -Uri "https://api.tailscale.com/api/v2/tailnet/$tn/devices" -Headers @{ Authorization = "Basic $auth" }
-              foreach($d in $list.devices){
-                if ($d.hostname -match '^bullet[0-9]*$'){
-                  Invoke-RestMethod -Method Delete -Uri "https://api.tailscale.com/api/v2/device/$($d.id)" -Headers @{ Authorization = "Basic $auth" } -ErrorAction SilentlyContinue
-                }
-              }
-              Write-Host "Purged bullet* devices (if any)."
-            } catch { Write-Host "Purge warning: $($_.Exception.Message)" }
-          } else {
-            Write-Host "Purge disabled."
-          }
+          # إلغاء التأثيرات البصرية والشفافية لزيادة سرعة استجابة النوافذ
+          Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Name "EnableTransparency" -Value 0
+          Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "UserPreferencesMask" -Value ([byte[]](0x90,0x12,0x03,0x80,0x10,0x00,0x00,0x00))
+          
+          # تسريع الاستجابة وقرص التخزين المؤقت
+          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "fMouseClicksDisabled" -Value 0
+          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "LatencySensitive" -Value 1
+          
+          Write-Host "Windows UI and RDP optimizations applied successfully!"
 
       - name: Install + Up Tailscale
-        env:
-          TS_AUTHKEY: ${{ inputs.ts_authkey }}
         run: |
           $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
           if (-not (Test-Path $ts)) {
@@ -311,264 +162,42 @@ jobs:
             Remove-Item $dst -Force
           }
           & $ts logout | Out-Null
-          & $ts up --authkey "$env:TS_AUTHKEY" --hostname "$env:TS_HOSTNAME" --accept-dns=true --accept-routes=true --reset
+          & $ts up --authkey "${{ inputs.ts_authkey }}" --hostname "$env:TS_HOSTNAME" --accept-dns=true --accept-routes=true
           $ip4 = & $ts ip -4 | Select-Object -First 1
-          "TAILSCALE_IP=$ip4" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "TAILSCALE_IP=$ip4" | Out-File -Append $env:GITHUB_ENV
           Write-Host "Tailscale IPv4: $ip4"
 
-      - name: Tailscale Netcheck
+      - name: Enable RDP user + firewall
         run: |
-          $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
-          Write-Host "===== TAILSCALE NETCHECK ====="
-          & $ts netcheck
-          Write-Host "============================="
-
-      - name: Enable RDP user (no password) + firewall + blank-password logon
-        run: |
-          $u = $env:RDP_USER
-
-          # Create user with empty password
-          if (-not (Get-LocalUser -Name $u -ErrorAction SilentlyContinue)) {
-            New-LocalUser -Name $u -NoPassword -AccountNeverExpires -Description "RDP access user (no password)"
+          $u=$env:RDP_USER; $p=$env:RDP_PASS
+          $sec = ConvertTo-SecureString $p -AsPlainText -Force
+          if (-not (Get-LocalUser -Name $u -EA SilentlyContinue)) {
+            New-LocalUser -Name $u -Password $sec -AccountNeverExpires
+            Add-LocalGroupMember -Group "Administrators" -Member $u
+            Add-LocalGroupMember -Group "Remote Desktop Users" -Member $u
           } else {
+            Set-LocalUser -Name $u -Password $sec -AccountNeverExpires
             Enable-LocalUser -Name $u
-            # Clear any existing password -> set to empty
-            try {
-              $uObj = [ADSI]"WinNT://./$u,user"
-              $uObj.SetPassword("")
-              $uObj.SetInfo()
-            } catch { Write-Host "Clear password skipped: $($_.Exception.Message)" }
+            Add-LocalGroupMember -Group "Administrators" -Member $u -EA SilentlyContinue
+            Add-LocalGroupMember -Group "Remote Desktop Users" -Member $u -EA SilentlyContinue
           }
-
-          Add-LocalGroupMember -Group "Administrators" -Member $u -ErrorAction SilentlyContinue
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member $u -ErrorAction SilentlyContinue
-
-          # Enable RDP
           Set-ItemProperty "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name fDenyTSConnections -Value 0
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop" | Out-Null
 
-          # Allow blank passwords for network logon (RDP)
-          # 1) LSA policy
-          $lsaPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Lsa"
-          Set-ItemProperty -Path $lsaPath -Name "LimitBlankPasswordUse" -Type DWord -Value 0 -Force
-
-          # 2) Group Policy equivalent (Terminal Services)
-          $tsPolPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
-          if (-not (Test-Path $tsPolPath)) { New-Item -Path $tsPolPath -Force | Out-Null }
-          # fPromptForPassword = 0 -> don't prompt, allow blank
-          Set-ItemProperty -Path $tsPolPath -Name "fPromptForPassword" -Type DWord -Value 0 -Force
-
-          Write-Host "RDP ready. user=$u (no password) host=$env:TS_HOSTNAME ip=$env:TAILSCALE_IP"
-
-      - name: Apply RDP Performance Tuning
-        run: |
-          $tsPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
-          if (-not (Test-Path $tsPath)) { New-Item -Path $tsPath -Force | Out-Null }
-          Set-ItemProperty -Path $tsPath -Name "SecurityLayer"                    -Type DWord -Value 1 -Force
-          Set-ItemProperty -Path $tsPath -Name "UserAuthentication"               -Type DWord -Value 0 -Force
-          Set-ItemProperty -Path $tsPath -Name "MinEncryptionLevel"               -Type DWord -Value 1 -Force
-          Set-ItemProperty -Path $tsPath -Name "ColorDepth"                       -Type DWord -Value 4 -Force
-          Set-ItemProperty -Path $tsPath -Name "MaxIdleTime"                      -Type DWord -Value 0 -Force
-          Set-ItemProperty -Path $tsPath -Name "MaxDisconnectionTime"             -Type DWord -Value 0 -Force
-          Set-ItemProperty -Path $tsPath -Name "MaxConnectionTime"                -Type DWord -Value 0 -Force
-          Set-ItemProperty -Path $tsPath -Name "fEnableRemoteFXAdvancedRemoteApp" -Type DWord -Value 1 -Force
-          Set-ItemProperty -Path $tsPath -Name "fDisableCam"                      -Type DWord -Value 1 -Force
-          Set-ItemProperty -Path $tsPath -Name "fDisableAudioCapture"             -Type DWord -Value 1 -Force
-          Set-ItemProperty -Path $tsPath -Name "fDisableClip"                     -Type DWord -Value 0 -Force
-          Set-ItemProperty -Path $tsPath -Name "fEnableSmartCard"                 -Type DWord -Value 0 -Force
-          Set-ItemProperty -Path $tsPath -Name "fDisablePNPRedir"                 -Type DWord -Value 1 -Force
-          Set-ItemProperty -Path $tsPath -Name "fDisableDefaultMainClientPrinter" -Type DWord -Value 1 -Force
-          Set-ItemProperty -Path $tsPath -Name "fDisableCcm"                      -Type DWord -Value 1 -Force
-          Set-ItemProperty -Path $tsPath -Name "fDisableLPT"                      -Type DWord -Value 1 -Force
-          Set-ItemProperty -Path $tsPath -Name "fEnableWindowsKey"                -Type DWord -Value 1 -Force
-          Set-ItemProperty -Path $tsPath -Name "fPromptForPassword"               -Type DWord -Value 0 -Force
-          Write-Host "RDP-Tcp policies applied (SecurityLayer=RDP, NLA off, blank password allowed, channels pruned)."
-
-          # WMI: skip UserAuthenticationRequired (readonly)
-          try {
-            $t = Get-CimInstance -ClassName "Win32_TSGeneralSetting" -Namespace "root\cimv2\TerminalServices" -Filter "TerminalName='RDP-Tcp'"
-            if ($t) {
-              Set-CimInstance -InputObject $t -Property @{ SecurityLayer = 1; MinEncryptionLevel = 1 } -ErrorAction SilentlyContinue
-            }
-          } catch { Write-Host "WMI RDP-Tcp tune skipped: $($_.Exception.Message)" }
-
-          # --- Tune user hives via reg CLI (no PSDrive needed) ---
-          function Set-RegVal {
-            param([string]$Path, [string]$Name, [string]$Type, [string]$Value)
-            & reg add "$Path" /v "$Name" /t "$Type" /d "$Value" /f | Out-Null
-          }
-
-          function Tune-Hive {
-            param([string]$Hive)
-            $root = $Hive
-            Set-RegVal "$root\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" "VisualFXSetting" "REG_DWORD" "2"
-            $desk = "$root\Control Panel\Desktop"
-            Set-RegVal $desk "DragFullWindows" "REG_SZ" "0"
-            Set-RegVal $desk "FontSmoothing"   "REG_SZ" "0"
-            Set-RegVal $desk "MenuShowDelay"   "REG_SZ" "0"
-            Set-RegVal $desk "SmoothScroll"    "REG_DWORD" "0"
-            & reg add "$desk" /v "UserPreferencesMask" /t REG_BINARY /d "90120180" /f | Out-Null
-            Set-RegVal "$root\Control Panel\Desktop\WindowMetrics" "MinAnimate" "REG_SZ" "0"
-            $adv = "$root\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
-            Set-RegVal $adv "ListviewAlphaSelect"   "REG_DWORD" "0"
-            Set-RegVal $adv "TaskbarAnimations"     "REG_DWORD" "0"
-            Set-RegVal $adv "IconsOnly"             "REG_DWORD" "1"
-            Set-RegVal $adv "DisablePreviewDesktop" "REG_DWORD" "1"
-            Set-RegVal "$root\Software\Microsoft\Windows\DWM" "EnableAeroPeek" "REG_DWORD" "0"
-          }
-
-          $defNt = "C:\Users\Default\NTUSER.DAT"
-          if (Test-Path $defNt) {
-            & reg load "HKU\DefTune" $defNt | Out-Null
-            Tune-Hive "HKU\DefTune"
-            [gc]::Collect()
-            & reg unload "HKU\DefTune" | Out-Null
-            Write-Host "Default user profile tuned."
-          }
-
-          $rdpNt = "C:\Users\$env:RDP_USER\NTUSER.DAT"
-          if (Test-Path $rdpNt) {
-            & reg load "HKU\RdpTune" $rdpNt | Out-Null
-            Tune-Hive "HKU\RdpTune"
-            [gc]::Collect()
-            & reg unload "HKU\RdpTune" | Out-Null
-            Write-Host "RDP user profile tuned."
-          }
-
-          foreach ($svc in @("SysMain","WSearch","DiagTrack","MapsBroker")) {
-            try {
-              Stop-Service -Name $svc -Force -ErrorAction SilentlyContinue
-              Set-Service -Name $svc -StartupType Disabled -ErrorAction SilentlyContinue
-              Write-Host "Disabled service: $svc"
-            } catch { Write-Host "Skip $svc : $($_.Exception.Message)" }
-          }
-
-          Restart-Service -Name TermService -Force -ErrorAction SilentlyContinue
-          Write-Host "TermService restarted. RDP tuning complete."
-
-      - name: Generate tuned .rdp client file
-        run: |
-          $ip = $env:TAILSCALE_IP
-          $lines = @(
-            "full address:s:$ip:3389",
-            "username:s:$env:RDP_USER",
-            "prompt for credentials:i:0",
-            "authentication level:i:0",
-            "session bpp:i:32",
-            "compression:i:1",
-            "keyboardhook:i:2",
-            "audiocapturemode:i:0",
-            "audiomode:i:0",
-            "redirectprinters:i:0",
-            "redirectcomports:i:0",
-            "redirectsmartcards:i:0",
-            "redirectclipboard:i:1",
-            "redirectposdevices:i:0",
-            "redirectdrives:i:0",
-            "disable wallpaper:i:1",
-            "disable full window drag:i:1",
-            "disable menu anims:i:1",
-            "disable themes:i:1",
-            "disable cursor setting:i:0",
-            "bitmapcachepersistenable:i:1",
-            "networkautodetect:i:1",
-            "bandwidthautodetect:i:1",
-            "connection type:i:7",
-            "displayconnection:i:0"
-          )
-          $rdpContent = ($lines -join "`r`n") + "`r`n"
-          $out = "$env:RUNNER_TEMP\bullet-tuned.rdp"
-          Set-Content -Path $out -Value $rdpContent -Encoding UTF8
-          "RDP_FILE=$out" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          Write-Host "Tuned .rdp written to: $out"
-          Write-Host "----- .rdp contents -----"
-          Get-Content $out
-          Write-Host "-------------------------"
-
-      - name: Upload tuned .rdp file
-        uses: actions/upload-artifact@v4
-        with:
-          name: bullet-tuned-rdp-${{ matrix.id }}
-          path: ${{ env.RDP_FILE }}
-          if-no-files-found: warn
-          retention-days: 7
-
       - name: Display Hardware Info
         run: |
-          Write-Host "===== HARDWARE INFORMATION ====="
           $cpu = Get-CimInstance Win32_Processor
           $ram = Get-CimInstance Win32_ComputerSystem
           $totalRAM = [math]::Round($ram.TotalPhysicalMemory / 1GB, 2)
-
           Write-Host "Tailscale IP: $env:TAILSCALE_IP"
           Write-Host "RAM (GB): $totalRAM"
           Write-Host "Processor (CPU): $($cpu.Name)"
           Write-Host "Cores: $($cpu.NumberOfLogicalProcessors)"
-          Write-Host "RDP Target: $env:TAILSCALE_IP:3389  user=$env:RDP_USER (no password)"
-          Write-Host "==============================="
 
       - name: Keep alive
         run: |
-          $mins = [int]"$env:RUNTIME_MINUTES"
+          $mins = [int]"${{ env.RUNTIME_MINUTES }}"
           $end = (Get-Date).AddMinutes($mins)
           while ((Get-Date) -lt $end) {
-            $mode = if ("$env:CRD_ENABLED" -eq '1') { '[CRD+RDP]' } else { '[RDP]' }
-            Write-Host ("$mode Heartbeat " + (Get-Date).ToString("HH:mm:ss") + " ends at " + $end.ToString("HH:mm:ss"))
             Start-Sleep -Seconds 60
-          }
-
-      - name: Dispatch next or stop
-        if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CYCLES: ${{ inputs.cycles }}
-          TS_TAILNET: ${{ inputs.ts_tailnet }}
-          TS_API_KEY: ${{ inputs.ts_api_key }}
-          TS_AUTHKEY: ${{ inputs.ts_authkey }}
-          QUICK_TEST: ${{ inputs.quick_test }}
-          RUNTIME_MIN: ${{ inputs.runtime_minutes }}
-          DO_PURGE: ${{ inputs.do_purge }}
-          RDP_COUNT: ${{ inputs.rdp_count }}
-          CRD_CODE: ${{ inputs.crd_code }}
-          CRD_PIN: ${{ inputs.crd_pin }}
-          GH_REF: ${{ github.ref_name }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          $cycles = [int]"$env:CYCLES"
-          if ($cycles -gt 0) {
-            $next = $cycles - 1
-            if ($next -le 0) {
-              $url = "https://api.github.com/repos/$env:GH_REPO/actions/workflows/rdp-tailscale-stop.yml/dispatches"
-              $hdr = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = "application/vnd.github+json" }
-              $payload = @{
-                ts_tailnet  = "$env:TS_TAILNET"
-                ts_api_key  = "$env:TS_API_KEY"
-                base_prefix = "bullet"
-                max_count   = "10"
-                dry_run     = "false"
-              }
-              $body = @{ ref = "$env:GH_REF"; inputs = $payload } | ConvertTo-Json -Depth 20
-              Invoke-WebRequest -Method POST -Uri $url -Headers $hdr -Body $body | Out-Null
-              Write-Host "Dispatched STOP."
-            } else {
-              $payload = @{
-                ts_tailnet      = "$env:TS_TAILNET"
-                ts_api_key      = "$env:TS_API_KEY"
-                ts_authkey      = "$env:TS_AUTHKEY"
-                quick_test      = "$env:QUICK_TEST"
-                runtime_minutes = "$env:RUNTIME_MIN"
-                do_purge        = "$env:DO_PURGE"
-                cycles          = "$next"
-                rdp_count       = "$env:RDP_COUNT"
-                crd_code        = "$env:CRD_CODE"
-                crd_pin         = "$env:CRD_PIN"
-              }
-              $url2 = "https://api.github.com/repos/$env:GH_REPO/actions/workflows/rdp-tailscale-B.yml/dispatches"
-              $hdr2 = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = "application/vnd.github+json" }
-              $body2 = @{ ref = "$env:GH_REF"; inputs = $payload } | ConvertTo-Json -Depth 20
-              Invoke-WebRequest -Method POST -Uri $url2 -Headers $hdr2 -Body $body2 | Out-Null
-              Write-Host "Dispatched Workflow B with cycles=$next"
-            }
-          } else {
-            Write-Host "No cycles configured. Done."
           }
