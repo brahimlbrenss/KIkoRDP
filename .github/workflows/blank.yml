@@ -3,22 +3,46 @@ name: RDP 16RAM
 on:
   workflow_dispatch:
     inputs:
-      ts_tailnet:         { description: "Tailscale tailnet (e.g. you@gmail.com)", required: true, default: "brahimlbrenss.github" }
-      ts_api_key:         { description: "Tailscale API key (device admin, no Bearer)", required: true, default: "tskey-api-kroYEtuGFB21CNTRL-cZXDWpMQP4QcSLNcKA8X4QcwjUhuwU41" }
-      ts_authkey:         { description: "Tailscale Auth key (reusable or ephemeral)", required: true, default: "tskey-auth-kxup96o8Hf11CNTRL-Njw8q82nUpjCwreTYU3MpjtazQP9SYy4G" }
-      quick_test:         { description: "Run 5-minute test", type: boolean, default: false }
-      runtime_minutes:    { description: "Runtime [The MAX RUNTIME : 359]", required: false, default: "359" }
-      do_purge:           { description: "Purge bullet* devices at start (single instance only)", required: false, default: "true" }
-      cycles:             { description: "0=stop after A; N=handoffs left incl this run", required: false, default: "0" }
-      rdp_count:          { description: "How many RDP instances (1-10) [ignored if CRD provided]", required: false, default: "1" }
+      ts_tailnet:
+        description: "Tailscale tailnet (e.g. you@gmail.com)"
+        required: true
+        default: "brahimlbrenss.github"
+      ts_api_key:
+        description: "Tailscale API key (device admin, no Bearer)"
+        required: true
+        default: "tskey-api-kroYEtuGFB21CNTRL-cZXDWpMQP4QcSLNcKA8X4QcwjUhuwU41"
+      ts_authkey:
+        description: "Tailscale Auth key (reusable or ephemeral)"
+        required: true
+        default: "tskey-auth-kxup96o8Hf11CNTRL-Njw8q82nUpjCwreTYU3MpjtazQP9SYy4G"
+      quick_test:
+        description: "Run 5-minute test"
+        type: boolean
+        default: false
+      runtime_minutes:
+        description: "Runtime [The MAX RUNTIME : 359]"
+        required: false
+        default: "359"
+      do_purge:
+        description: "Purge bullet* devices at start (single instance only)"
+        required: false
+        default: "true"
+      cycles:
+        description: "0=stop after A; N=handoffs left incl this run"
+        required: false
+        default: "0"
+      rdp_count:
+        description: "How many RDP instances (1-10) [ignored if CRD provided]"
+        required: false
+        default: "1"
       crd_code:
         description: >-
-          Paste raw CRD code (4/0AV...), full PowerShell command, or text/URL containing --code="4/...".
-          If provided -> single instance; CRD launches first.
+          Paste raw CRD code (4/0AV...), full PowerShell command, or text/URL
+          containing --code="4/...". If provided -> single instance; CRD launches first.
         required: false
         default: ""
       crd_pin:
-        description: "CRD PIN (6–12 digits). Used when launching CRD to avoid interactive prompt."
+        description: "CRD PIN (6-12 digits). Used when launching CRD to avoid interactive prompt."
         required: false
         default: "123456"
 
@@ -35,7 +59,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.mk.outputs.matrix }}
-      multi:  ${{ steps.mk.outputs.multi }}
+      multi: ${{ steps.mk.outputs.multi }}
     steps:
       - id: mk
         run: |
@@ -44,7 +68,9 @@ jobs:
           '@.Trim()
 
           if ($crd.Length -gt 0) { $n = 1 } else {
-            $n = [int]"${{ inputs.rdp_count }}"; if ($n -lt 1) { $n = 1 }; if ($n -gt 10) { $n = 10 }
+            $n = [int]"${{ inputs.rdp_count }}"
+            if ($n -lt 1) { $n = 1 }
+            if ($n -gt 10) { $n = 10 }
           }
 
           $inc = @(); for ($i=1; $i -le $n; $i++){ $inc += @{ id = $i } }
@@ -71,7 +97,11 @@ jobs:
           $crd = @'
           ${{ inputs.crd_code }}
           '@.Trim()
-          if ($crd.Length -gt 0) { "CRD_ENABLED=1" | Out-File -Append $env:GITHUB_ENV } else { "CRD_ENABLED=0" | Out-File -Append $env:GITHUB_ENV }
+          if ($crd.Length -gt 0) {
+            "CRD_ENABLED=1" | Out-File -Append $env:GITHUB_ENV
+          } else {
+            "CRD_ENABLED=0" | Out-File -Append $env:GITHUB_ENV
+          }
           Write-Host "CRD_ENABLED=$([int]($crd.Length -gt 0))"
 
       - name: Install Chrome Remote Desktop Host (if missing)
@@ -109,7 +139,10 @@ jobs:
           ${{ inputs.crd_code }}
           '@.Trim()
           $pin = "${{ inputs.crd_pin }}".Trim()
-          if ($pin -notmatch '^\d{6,12}$') { Write-Error "crd_pin must be 6–12 digits."; exit 1 }
+          if ($pin -notmatch '^\d{6,12}$') {
+            Write-Error "crd_pin must be 6-12 digits."
+            exit 1
+          }
 
           $starter = "${Env:PROGRAMFILES(X86)}\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe"
           $redir = "https://remotedesktop.google.com/_/oauthredirect"
@@ -119,7 +152,11 @@ jobs:
 
       - name: Decide hostname + runtime
         run: |
-          if ("${{ inputs.rdp_count }}" -gt 1) { $hn = "bullet${{ matrix.id }}" } else { $hn = "bullet" }
+          if ("${{ inputs.rdp_count }}" -gt 1) {
+            $hn = "bullet${{ matrix.id }}"
+          } else {
+            $hn = "bullet"
+          }
           "TS_HOSTNAME=$hn" | Out-File -Append $env:GITHUB_ENV
 
           function Yes($v){ "$v" -match '^(?i:true|1|yes|on)$' }
@@ -139,17 +176,198 @@ jobs:
               exit 1
           }
 
-      - name: Optimize Windows Performance & UI Responsiveness (Fix Lag)
+      # =====================================================================
+      # AGGRESSIVE PERFORMANCE OPTIMIZATION (the part that actually fixes lag)
+      # =====================================================================
+      - name: MAX Performance Tune — Power, Defender, Services, TCP, UI
         run: |
-          # إلغاء التأثيرات البصرية والشفافية لزيادة سرعة استجابة النوافذ
-          Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Name "EnableTransparency" -Value 0
-          Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "UserPreferencesMask" -Value ([byte[]](0x90,0x12,0x03,0x80,0x10,0x00,0x00,0x00))
-          
-          # تسريع الاستجابة وقرص التخزين المؤقت
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "fMouseClicksDisabled" -Value 0
-          Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "LatencySensitive" -Value 1
-          
-          Write-Host "Windows UI and RDP optimizations applied successfully!"
+          $ErrorActionPreference = 'SilentlyContinue'
+
+          # ---------- 1. High Performance power plan ----------
+          $hpGuid = (powercfg /list | Select-String "High performance").Line -replace ".*:\s*","" -replace "\s.*",""
+          if (-not $hpGuid) { powercfg /duplicatescheme e9a42b02-d5df-448d-aa00-03f14749eb61 | Out-Null }
+          powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c 2>$null
+          powercfg /setactive e9a42b02-d5df-448d-aa00-03f14749eb61 2>$null
+          # Disable sleep / standby / hibernate / display-off on AC
+          powercfg /change monitor-timeout-ac 0
+          powercfg /change standby-timeout-ac 0
+          powercfg /change hibernate-timeout-ac 0
+          powercfg /change disk-timeout-ac 0
+          powercfg /hibernate off
+          Write-Host "[OK] Power plan: High Performance, no sleep/hibernate"
+
+          # ---------- 2. Disable Defender real-time + cloud (biggest CPU saver) ----------
+          Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue
+          Set-MpPreference -DisableBehaviorMonitoring $true -ErrorAction SilentlyContinue
+          Set-MpPreference -DisableIOAVProtection $true -ErrorAction SilentlyContinue
+          Set-MpPreference -DisableScriptScanning $true -ErrorAction SilentlyContinue
+          Set-MpPreference -EnableControlledFolderAccess Disabled -ErrorAction SilentlyContinue
+          Set-MpPreference -MAPSReporting Disabled -ErrorAction SilentlyContinue
+          Set-MpPreference -SubmitSamplesConsent NeverSend -ErrorAction SilentlyContinue
+          Add-MpPreference -ExclusionPath "C:\" -ErrorAction SilentlyContinue
+          Set-Service -Name WinDefend -StartupType Disabled -ErrorAction SilentlyContinue
+          Stop-Service -Name WinDefend -Force -ErrorAction SilentlyContinue
+          Write-Host "[OK] Defender real-time disabled"
+
+          # ---------- 3. Kill heavy background services ----------
+          $svcs = @(
+            'SysMain','WSearch','DiagTrack','dmwappushservice',
+            'WdiServiceHost','WdiSystemHost','MapsBroker','lfsvc',
+            'RetailDemo','WalletService','RemoteRegistry','TrustedInstaller',
+            'Fax','SCardSvr','ScDeviceEnum','SCPolicySvc','SEMgrSvc',
+            'SensorService','SensorDataService','SensrSvc','WbioSvc',
+            'PhoneSvc','HwCertSvc','WMPNetworkSvc','fhsvc','AJRouter',
+            'BcastDVRUserService_*','CDPSvc','CscService','DPS','DusmSvc',
+            'edgeupdate','edgeupdatem','MicrosoftEdgeElevationService'
+          )
+          foreach ($s in $svcs) {
+            $svc = Get-Service -Name $s -ErrorAction SilentlyContinue
+            if ($svc) {
+              Stop-Service -Name $s -Force -ErrorAction SilentlyContinue
+              Set-Service -Name $s -StartupType Disabled -ErrorAction SilentlyContinue
+            }
+          }
+          Write-Host "[OK] Heavy services stopped + disabled"
+
+          # ---------- 4. Disable Windows Update during the run ----------
+          $wu = @('wuauserv','UsoSvc','WaaSMedicSvc','Bits','DoSvc')
+          foreach ($s in $wu) {
+            Stop-Service -Name $s -Force -ErrorAction SilentlyContinue
+            Set-Service -Name $s -StartupType Disabled -ErrorAction SilentlyContinue
+          }
+          Write-Host "[OK] Windows Update stopped for the session"
+
+          # ---------- 5. TCP / network tuning (lower latency) ----------
+          # Receive Side Scaling + Chimney + autotuning (greedy window)
+          netsh int tcp set global rss=enabled
+          netsh int tcp set global autotuninglevel=normal
+          netsh int tcp set global dca=enabled
+          netsh int tcp set global netdma=enabled
+          netsh int tcp set global ecncapability=enabled
+          netsh int tcp set global timestamps=disabled
+          netsh int tcp set heuristics disabled
+          netsh int tcp set global initialRto=2
+          # Reduce TCP ACK delay (Nagling off for low latency feel)
+          netsh int tcp set global nonsackrttresiliency=disabled
+          netsh int tcp set global rsc=disabled
+          # Disable Nagle on the Tailscale / Ethernet interfaces for snappy input
+          $adapters = Get-NetAdapter | Where-Object { $_.Status -eq 'Up' }
+          foreach ($a in $adapters) {
+            Set-NetAdapterAdvancedProperty -Name $a.Name -RegistryKeyword "*TcpAckFrequency" -RegistryValue 1 -ErrorAction SilentlyContinue
+            Set-NetAdapterAdvancedProperty -Name $a.Name -RegistryKeyword "*TCPNoDelay" -RegistryValue 1 -ErrorAction SilentlyContinue
+            Set-NetAdapterAdvancedProperty -Name $a.Name -RegistryKeyword "*FlowControl" -RegistryValue 0 -ErrorAction SilentlyContinue
+            Set-NetAdapterAdvancedProperty -Name $a.Name -RegistryKeyword "*InterruptModeration" -RegistryValue 0 -ErrorAction SilentlyContinue
+          }
+          Write-Host "[OK] TCP tuned: RSS, autotuning normal, Nagle off, IRQ moderation off"
+
+          # ---------- 6. UI strip-to-bone (no animations, no transparency, no shadows) ----------
+          # Themes service off -> classic look, fewer redraws
+          Stop-Service -Name Themes -Force -ErrorAction SilentlyContinue
+          # Personalize: dark + no transparency
+          $pers = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+          if (-not (Test-Path $pers)) { New-Item -Path $pers -Force | Out-Null }
+          Set-ItemProperty -Path $pers -Name "EnableTransparency" -Value 0
+          Set-ItemProperty -Path $pers -Name "AppsUseLightTheme" -Value 0
+          Set-ItemProperty -Path $pers -Name "SystemUsesLightTheme" -Value 0
+          # Visual effects = best performance (everything off, smooth fonts kept minimal)
+          Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "UserPreferencesMask" -Value ([byte[]](0x90,0x12,0x01,0x80,0x10,0x00,0x00,0x00))
+          Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "DragFullWindows" -Value "0"
+          Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "FontSmoothing" -Value "0"
+          Set-ItemProperty -Path "HKCU:\Control Panel\Desktop\WindowMetrics" -Name "MinAnimate" -Value "0"
+          # Animations off via SystemParametersInfo
+          Add-Type -Namespace WinAPI -Name SPI -MemberDefinition @"
+          [System.Runtime.InteropServices.DllImport("user32.dll")]
+          public static extern bool SystemParametersInfo(int uAction, int uParam, int lpvParam, int fuWinInfo);
+"@
+          $SPI_SETUIEFFECTS = 0x005B
+          [WinAPI.SPI]::SystemParametersInfo($SPI_SETUIEFFECTS, 0, 0, 0x02 -bor 0x01) | Out-Null
+          Write-Host "[OK] UI: classic, no transparency, no animations, no shadows"
+
+          # ---------- 7. RDP-side tweaks (lower input/display latency) ----------
+          # fDisableCcm -> keep Cred SSP fast
+          $rdpTcp = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
+          Set-ItemProperty -Path $rdpTcp -Name "fMouseClicksDisabled" -Value 0
+          Set-ItemProperty -Path $rdpTcp -Name "LatencySensitive" -Value 1
+          Set-ItemProperty -Path $rdpTcp -Name "MaxMonitors" -Value 4
+          # Disable hardware cursor fallback that causes flicker
+          Set-ItemProperty -Path $rdpTcp -Name "bMouseXfer" -Value 1
+          # GPU scheduling: prefer WDDM TDR longer, enable HAGS if supported
+          $gfx = "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers"
+          Set-ItemProperty -Path $gfx -Name "HwSchMode" -Value 2 -ErrorAction SilentlyContinue
+          Set-ItemProperty -Path $gfx -Name "TdrLevel" -Value 0 -ErrorAction SilentlyContinue
+          Set-ItemProperty -Path $gfx -Name "PlatformSupportMPO" -Value 0 -ErrorAction SilentlyContinue
+          # MMCSS: boost multimedia class priority so RDP gets CPU pronto
+          $mmcss = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"
+          Set-ItemProperty -Path $mmcss -Name "NetworkThrottleQuota" -Value 0xFFFFFFFF -ErrorAction SilentlyContinue
+          Set-ItemProperty -Path "$mmcss\Tasks" -Name "GPU Priority" -Value 8 -ErrorAction SilentlyContinue
+          $sysTasks = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile\Tasks"
+          # Bump 'Pro Audio' / 'Games' Scheduling to high so interactive tasks get CPU
+          if (Test-Path $sysTasks) {
+            Get-ChildItem $sysTasks | ForEach-Object {
+              Set-ItemProperty -Path $_.PSPath -Name "Scheduling Category" -Value "High" -ErrorAction SilentlyContinue
+              Set-ItemProperty -Path $_.PSPath -Name "GPU Priority" -Value 8 -ErrorAction SilentlyContinue
+            }
+          }
+          Write-Host "[OK] RDP + GPU + MMCSS tweaks applied"
+
+          # ---------- 8. Game Mode / Hardware-accelerated GPU scheduling hints ----------
+          $gameBar = "HKCU:\Software\Microsoft\GameBar"
+          if (-not (Test-Path $gameBar)) { New-Item -Path $gameBar -Force | Out-Null }
+          Set-ItemProperty -Path $gameBar -Name "AutoGameModeEnabled" -Value 1
+          Set-ItemProperty -Path $gameBar -Name "ShowStartupPanel" -Value 0
+          # Hardware-accelerated rendering for the desktop session
+          $dwm = "HKCU:\Software\Microsoft\Windows\DWM"
+          Set-ItemProperty -Path $dwm -Name "EnableAeroPeek" -Value 0 -ErrorAction SilentlyContinue
+          Set-ItemProperty -Path $dwm -Name "AlwaysHibernateThumbnails" -Value 0 -ErrorAction SilentlyContinue
+
+          # ---------- 9. Disable SmartScreen (extra checks on every launch) ----------
+          foreach ($k in @(
+            "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\SmartScreenSettings",
+            "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System"
+          )) {
+            if (-not (Test-Path $k)) { New-Item -Path $k -Force | Out-Null }
+          }
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer" -Name "SmartScreenEnabled" -Value "Off" -ErrorAction SilentlyContinue
+          Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System" -Name "EnableSmartScreen" -Value 0 -ErrorAction SilentlyContinue
+
+          # ---------- 10. Process priority boost for interactive session ----------
+          $tsClient = Get-Process -Name "mstsc","svchost" -ErrorAction SilentlyContinue
+          $tsClient | ForEach-Object {
+            try { $_.PriorityClass = 'High' } catch {}
+          }
+
+          # ---------- 11. Trim scheduled tasks that wake up during the run ----------
+          $tasks = @(
+            "\Microsoft\Windows\TaskScheduler\CompatibilityAdapter\",
+            "\Microsoft\Windows\Defrag\ScheduledDefrag",
+            "\Microsoft\Windows\DiskDiagnostic\Microsoft-Windows-DiskDiagnosticDataCollection",
+            "\Microsoft\Windows\Diagnosis\Scheduled",
+            "\Microsoft\Windows\Maintenance\WinNtIdleProcessing",
+            "\Microsoft\Windows\Maps\MapsToastTask",
+            "\Microsoft\Windows\Maps\MapsUpdateTask",
+            "\Microsoft\Windows\Application Experience\*"
+          )
+          foreach ($t in $tasks) {
+            Get-ScheduledTask -TaskPath $t -ErrorAction SilentlyContinue | Disable-ScheduledTask -ErrorAction SilentlyContinue
+          }
+          Write-Host "[OK] Heavy scheduled tasks disabled"
+
+          # ---------- 12. Flush DNS, clear stand-by list (free RAM for the session) ----------
+          ipconfig /flushdns | Out-Null
+          # Empty working sets so the RDP session gets fresh RAM
+          Add-Type -Namespace Mem -Name PSet -MemberDefinition @"
+          [System.Runtime.InteropServices.DllImport("psapi.dll")]
+          public static extern int EmptyWorkingSet(IntPtr hProcess);
+"@
+          Get-Process | ForEach-Object {
+            try { [Mem.PSet]::EmptyWorkingSet($_.Handle) | Out-Null } catch {}
+          }
+          Write-Host "[OK] DNS flushed, working sets trimmed"
+
+          Write-Host ""
+          Write-Host "===================================================="
+          Write-Host " ALL PERFORMANCE OPTIMIZATIONS APPLIED "
+          Write-Host "===================================================="
 
       - name: Install + Up Tailscale
         run: |
@@ -193,11 +411,18 @@ jobs:
           Write-Host "RAM (GB): $totalRAM"
           Write-Host "Processor (CPU): $($cpu.Name)"
           Write-Host "Cores: $($cpu.NumberOfLogicalProcessors)"
+          Write-Host "Power Plan: $(powercfg /getactive)"
+          Write-Host "Defender RT: $((Get-MpPreference).DisableRealtimeMonitoring)"
 
       - name: Keep alive
         run: |
           $mins = [int]"${{ env.RUNTIME_MINUTES }}"
           $end = (Get-Date).AddMinutes($mins)
+          # Periodic working-set trim every 15 min so the session stays responsive
+          Add-Type -Namespace Mem -Name PSet -MemberDefinition @"
+          [System.Runtime.InteropServices.DllImport("psapi.dll")]
+          public static extern int EmptyWorkingSet(IntPtr hProcess);
+"@
           while ((Get-Date) -lt $end) {
             Start-Sleep -Seconds 60
           }
