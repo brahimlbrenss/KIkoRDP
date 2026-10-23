@@ -189,7 +189,7 @@ jobs:
           powercfg /hibernate off
           Write-Host "[OK] Power plan"
 
-          # 2. Defender off (best-effort, never fail the step)
+          # 2. Defender off (best-effort)
           try { Set-MpPreference -DisableRealtimeMonitoring $true } catch {}
           try { Set-MpPreference -DisableBehaviorMonitoring $true } catch {}
           try { Set-MpPreference -DisableIOAVProtection $true } catch {}
@@ -202,12 +202,7 @@ jobs:
           Write-Host "[OK] Defender best-effort"
 
           # 3. Heavy services off
-          $svcs = @(
-            'SysMain','WSearch','DiagTrack','dmwappushservice',
-            'WdiServiceHost','WdiSystemHost','MapsBroker','lfsvc',
-            'RetailDemo','RemoteRegistry','Fax','SCardSvr',
-            'SensorService','WbioSvc','PhoneSvc','CscService','DPS','DusmSvc'
-          )
+          $svcs = @('SysMain','WSearch','DiagTrack','dmwappushservice','WdiServiceHost','WdiSystemHost','MapsBroker','lfsvc','RetailDemo','RemoteRegistry','Fax','SCardSvr','SensorService','PhoneSvc','CscService','DPS','DusmSvc')
           foreach ($s in $svcs) {
             try { Stop-Service -Name $s -Force } catch {}
             try { Set-Service -Name $s -StartupType Disabled } catch {}
@@ -265,12 +260,10 @@ jobs:
           try { Set-ItemProperty -Path $dwm -Name "AlwaysHibernateThumbnails" -Value 0 } catch {}
           Write-Host "[OK] Game Mode"
 
-          # 9. Flush DNS + trim working sets
+          # 9. Flush DNS + trim working sets (single-line Add-Type, no here-string)
           ipconfig /flushdns | Out-Null
-          Add-Type -Namespace Mem -Name PSet -MemberDefinition @"
-          [System.Runtime.InteropServices.DllImport("psapi.dll")]
-          public static extern int EmptyWorkingSet(IntPtr hProcess);
-"@
+          $code = '[System.Runtime.InteropServices.DllImport("psapi.dll")] public static extern int EmptyWorkingSet(IntPtr hProcess);'
+          Add-Type -Namespace Mem -Name PSet -MemberDefinition $code -ErrorAction SilentlyContinue
           Get-Process | ForEach-Object {
             try { [Mem.PSet]::EmptyWorkingSet($_.Handle) | Out-Null } catch {}
           }
