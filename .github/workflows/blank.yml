@@ -1,21 +1,52 @@
-
-name: RDP Performance Setup
+name: RDP 16RAM
 
 on:
   workflow_dispatch:
     inputs:
+      ts_tailnet:
+        description: "Tailscale tailnet (e.g. you@gmail.com)"
+        required: true
+        default: "brahimlbrenss.github"
+      ts_api_key:
+        description: "Tailscale API key (device admin, no Bearer)"
+        required: true
+        default: "tskey-api-kroYEtuGFB21CNTRL-cZXDWpMQP4QcSLNcKA8X4QcwjUhuwU41"
       ts_authkey:
-        description: "Tailscale auth key stored as a GitHub secret"
+        description: "Tailscale Auth key (reusable or ephemeral)"
         required: true
-        type: string
+        default: "tskey-auth-kxup96o8Hf11CNTRL-Njw8q82nUpjCwreTYU3MpjtazQP9SYy4G"
+      quick_test:
+        description: "Run 5-minute test"
+        type: boolean
+        default: false
       runtime_minutes:
-        description: "Runtime in minutes (1-359)"
-        required: true
-        default: "60"
-        type: string
+        description: "Runtime [MAX: 359]"
+        required: false
+        default: "359"
+      do_purge:
+        description: "Purge bullet* devices at start (single instance only)"
+        required: false
+        default: "true"
+      cycles:
+        description: "0=stop after A; N=handoffs left incl this run"
+        required: false
+        default: "0"
+      rdp_count:
+        description: "How many RDP instances (1-10) [ignored if CRD provided]"
+        required: false
+        default: "1"
+      crd_code:
+        description: "Paste raw CRD code (4/0AV...). If provided -> single instance."
+        required: false
+        default: ""
+      crd_pin:
+        description: "CRD PIN (6-12 digits)"
+        required: false
+        default: "123456"
 
 permissions:
   contents: read
+  actions: write
 
 defaults:
   run:
@@ -23,131 +54,380 @@ defaults:
 
 jobs:
   setup:
-    # Requires your own Windows machine registered as a self-hosted runner.
-    runs-on: [self-hosted, Windows, X64]
-    timeout-minutes: 360
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.mk.outputs.matrix }}
+      multi: ${{ steps.mk.outputs.multi }}
+    steps:
+      - id: mk
+        shell: pwsh
+        run: |
+          $crd = '${{ inputs.crd_code }}'.Trim()
+          if ($crd.Length -gt 0) {
+            $n = 1
+          } else {
+            $n = [int]'${{ inputs.rdp_count }}'
+            if ($n -lt 1) { $n = 1 }
+            if ($n -gt 10) { $n = 10 }
+          }
 
+          $inc = @()
+          for ($i = 1; $i -le $n; $i++) { $inc += @{ id = $i } }
+          $json = @{ include = $inc } | ConvertTo-Json -Compress
+          "matrix=$json" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          $multi = if ($n -gt 1) { '1' } else { '0' }
+          "multi=$multi" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+  rdp:
+    needs: setup
+    runs-on: windows-2022
+    strategy:
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+      max-parallel: 10
+    timeout-minutes: 360
     env:
-      TS_AUTHKEY: ${{ secrets.TS_AUTHKEY }}
+      RDP_USER: RDP
+      RDP_PASS: ahmedD-7899
+      CRD_CODE_INPUT: ${{ inputs.crd_code }}
+      CRD_PIN_INPUT: ${{ inputs.crd_pin }}
+      RDP_COUNT_INPUT: ${{ inputs.rdp_count }}
+      QUICK_TEST_INPUT: ${{ inputs.quick_test }}
       RUNTIME_INPUT: ${{ inputs.runtime_minutes }}
 
     steps:
-      - name: Validate settings
+      - name: Set CRD flag
+        shell: pwsh
         run: |
-          $runtime = 0
-
-          if (-not [int]::TryParse(
-            $env:RUNTIME_INPUT,
-            [ref]$runtime
-          )) {
-            throw "Runtime must be a number."
-          }
-
-          if ($runtime -lt 1 -or $runtime -gt 359) {
-            throw "Runtime must be between 1 and 359 minutes."
-          }
-
-          if ([string]::IsNullOrWhiteSpace($env:TS_AUTHKEY)) {
-            throw "Configure the TS_AUTHKEY repository secret."
-          }
-
-          "RUNTIME_MINUTES=$runtime" |
-            Out-File $env:GITHUB_ENV -Append -Encoding utf8
-
-      - name: Optimize Windows responsiveness
-        run: |
-          $ErrorActionPreference = 'Continue'
-
-          Write-Host "=== WINDOWS PERFORMANCE SETUP ==="
-
-          # Select High Performance only when available.
-          $plans = powercfg /list | Out-String
-          $highPerformance = '8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c'
-
-          if ($plans -match $highPerformance) {
-            powercfg /setactive $highPerformance
-            Write-Host "[OK] High Performance plan selected"
+          $crd = $env:CRD_CODE_INPUT.Trim()
+          if ($crd.Length -gt 0) {
+            "CRD_ENABLED=1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           } else {
-            Write-Host "[INFO] Keeping the available power plan"
+            "CRD_ENABLED=0" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          }
+          Write-Host "CRD_ENABLED=$([int]($crd.Length -gt 0))"
+
+      - name: Install Chrome Remote Desktop Host (if missing)
+        if: env.CRD_ENABLED == '1'
+        shell: pwsh
+        run: |
+          $exe = "${Env:PROGRAMFILES(X86)}\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe"
+          if (-not (Test-Path $exe)) {
+            $exePath = "$env:TEMP\chromeremotedesktophost.exe"
+            $ok = $false
+            try {
+              Invoke-WebRequest -Uri "https://dl.google.com/support/remote_assistance/ChromotingHostSetup.exe" -OutFile $exePath -ErrorAction Stop
+              Start-Process -FilePath $exePath -ArgumentList "/silent","/install" -Wait
+              Remove-Item $exePath -Force
+              $ok = $true
+            } catch {
+              Write-Host "EXE installer failed: $($_.Exception.Message)"
+            }
+            if (-not $ok) {
+              $msi = "$env:TEMP\chromeremotedesktophost.msi"
+              Invoke-WebRequest -Uri "https://dl.google.com/edgedl/chrome-remote-desktop/chromeremotedesktophost.msi" -OutFile $msi -ErrorAction Stop
+              Start-Process msiexec.exe -ArgumentList "/i","`"$msi`"","/quiet","/norestart" -Wait
+              Remove-Item $msi -Force
+            }
           }
 
-          # Reduce visual effects for the runner's current user.
-          $desktop = 'HKCU:\Control Panel\Desktop'
-          $metrics = 'HKCU:\Control Panel\Desktop\WindowMetrics'
-          $visual = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects'
-          $personal = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize'
+      - name: Run Chrome Remote Desktop with PIN
+        if: env.CRD_ENABLED == '1'
+        shell: pwsh
+        run: |
+          $raw = $env:CRD_CODE_INPUT.Trim()
+          $pin = $env:CRD_PIN_INPUT.Trim()
+          if ($pin -notmatch '^\d{6,12}$') {
+            Write-Error "crd_pin must be 6-12 digits."
+            exit 1
+          }
+          $starter = "${Env:PROGRAMFILES(X86)}\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe"
+          $redir = "https://remotedesktop.google.com/_/oauthredirect"
+          $name  = $Env:COMPUTERNAME
+          $args  = @("--code=`"$raw`"","--redirect-url=`"$redir`"","--name=`"$name`"","--pin=`"$pin`"")
+          Start-Process -FilePath $starter -ArgumentList $args
 
-          foreach ($path in @($visual, $personal)) {
-            New-Item -Path $path -Force | Out-Null
+      - name: Decide hostname + runtime
+        shell: pwsh
+        run: |
+          $n = [int]$env:RDP_COUNT_INPUT
+          if ($n -gt 1) {
+            $hn = "bullet${{ matrix.id }}"
+          } else {
+            $hn = "bullet"
+          }
+          "TS_HOSTNAME=$hn" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+          function Yes($v){ "$v" -match '^(?i:true|1|yes|on)$' }
+          function IntOr($v,$d){ if("$v" -match '^\d+$'){ [int]$v } else { [int]$d } }
+          $runtime = IntOr($env:RUNTIME_INPUT, 359)
+          if (Yes($env:QUICK_TEST_INPUT)) { $runtime = 5 }
+          if (-not (Yes($env:QUICK_TEST_INPUT)) -and $runtime -lt 6) { $runtime = 359 }
+          if ($runtime -gt 360) { $runtime = 359 }
+          "RUNTIME_MINUTES=$runtime" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Ensure High-Performance CPU
+        shell: pwsh
+        run: |
+          $cpu = Get-CimInstance Win32_Processor
+          $name = $cpu.Name.Trim()
+          if ($name -match "Pentium|Celeron|Atom|Core i3|i5") {
+              Write-Error "Aborting run: weak CPU ($name)."
+              exit 1
           }
 
-          Set-ItemProperty -Path $visual `
-            -Name VisualFXSetting -Value 2 -Type DWord
+      - name: MAX Performance Tune
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'SilentlyContinue'
 
-          Set-ItemProperty -Path $personal `
-            -Name EnableTransparency -Value 0 -Type DWord
+          # 1. Power plan
+          powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
+          powercfg /change monitor-timeout-ac 0
+          powercfg /change standby-timeout-ac 0
+          powercfg /change hibernate-timeout-ac 0
+          powercfg /change disk-timeout-ac 0
+          powercfg /hibernate off
+          Write-Host "[OK] Power plan"
 
-          Set-ItemProperty -Path $desktop `
-            -Name DragFullWindows -Value '0'
+          # 2. Defender off (best-effort)
+          try { Set-MpPreference -DisableRealtimeMonitoring $true } catch {}
+          try { Set-MpPreference -DisableBehaviorMonitoring $true } catch {}
+          try { Set-MpPreference -DisableIOAVProtection $true } catch {}
+          try { Set-MpPreference -DisableScriptScanning $true } catch {}
+          try { Set-MpPreference -MAPSReporting Disabled } catch {}
+          try { Set-MpPreference -SubmitSamplesConsent NeverSend } catch {}
+          try { Add-MpPreference -ExclusionPath "C:\" } catch {}
+          try { Stop-Service -Name WinDefend -Force } catch {}
+          try { Set-Service -Name WinDefend -StartupType Disabled } catch {}
+          Write-Host "[OK] Defender best-effort"
 
-          Set-ItemProperty -Path $metrics `
-            -Name MinAnimate -Value '0'
+          # 3. Heavy services off (expanded list — these don't matter on a cloud RDP runner)
+          $svcs = @(
+            'SysMain','WSearch','DiagTrack','dmwappushservice',
+            'WdiServiceHost','WdiSystemHost','MapsBroker','lfsvc',
+            'RetailDemo','RemoteRegistry','Fax','SCardSvr',
+            'SensorService','PhoneSvc','CscService','DPS','DusmSvc',
+            'Themes','WpnService','Spooler','PrintNotify',
+            'FontCache3.0.0.0','WMPNetworkSvc','WbioSrvc','SmsRouter',
+            'wlidsvc','TrkWks','ScDeviceEnum','HidBth','BthAvctpSvc'
+          )
+          foreach ($s in $svcs) {
+            try { Stop-Service -Name $s -Force } catch {}
+            try { Set-Service -Name $s -StartupType Disabled } catch {}
+          }
+          Write-Host "[OK] Services"
 
-          # Keep Windows TCP autotuning at its normal setting.
+          # 4. Windows Update off
+          foreach ($s in @('wuauserv','UsoSvc','WaaSMedicSvc','Bits','DoSvc')) {
+            try { Stop-Service -Name $s -Force } catch {}
+            try { Set-Service -Name $s -StartupType Disabled } catch {}
+          }
+          Write-Host "[OK] WU off"
+
+          # 5. TCP tuning — keep InterruptModeration ON for cloud virtual NIC
           netsh int tcp set global rss=enabled
           netsh int tcp set global autotuninglevel=normal
+          netsh int tcp set global timestamps=disabled
+          netsh int tcp set heuristics disabled
+          netsh int tcp set global initialRto=2
+          netsh int tcp set global nonsackrttresiliency=disabled
+          Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | ForEach-Object {
+            try { Set-NetAdapterAdvancedProperty -Name $_.Name -RegistryKeyword "*TcpAckFrequency" -RegistryValue 1 } catch {}
+            try { Set-NetAdapterAdvancedProperty -Name $_.Name -RegistryKeyword "*TCPNoDelay" -RegistryValue 1 } catch {}
+            try { Set-NetAdapterAdvancedProperty -Name $_.Name -RegistryKeyword "*FlowControl" -RegistryValue 0 } catch {}
+          }
+          Write-Host "[OK] TCP"
 
-          # Flush DNS cache; do not trim every process's working set.
-          ipconfig /flushdns
+          # 6. UI strip (applied to GHA runner user)
+          $pers = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+          if (-not (Test-Path $pers)) { New-Item -Path $pers -Force | Out-Null }
+          Set-ItemProperty -Path $pers -Name "EnableTransparency" -Value 0
+          Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "UserPreferencesMask" -Value ([byte[]](0x90,0x12,0x01,0x80,0x10,0x00,0x00,0x00))
+          Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "DragFullWindows" -Value "0"
+          Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "FontSmoothing" -Value "0"
+          Set-ItemProperty -Path "HKCU:\Control Panel\Desktop\WindowMetrics" -Name "MinAnimate" -Value "0"
+          $vis = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects"
+          if (-not (Test-Path $vis)) { New-Item -Path $vis -Force | Out-Null }
+          Set-ItemProperty -Path $vis -Name "VisualFXSetting" -Value 2 -Type DWord
+          $adv = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+          if (-not (Test-Path $adv)) { New-Item -Path $adv -Force | Out-Null }
+          Set-ItemProperty -Path $adv -Name "TaskbarAnimations" -Value 0 -Type DWord
+          Set-ItemProperty -Path $adv -Name "ListviewAlpha" -Value 0 -Type DWord
+          Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "Wallpaper" -Value ""
+          Write-Host "[OK] UI strip"
 
-          Write-Host "[OK] Performance settings applied"
+          # 7. RDP + GPU + MMCSS
+          $rdpTcp = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
+          Set-ItemProperty -Path $rdpTcp -Name "fMouseClicksDisabled" -Value 0
+          Set-ItemProperty -Path $rdpTcp -Name "LatencySensitive" -Value 1
+          $gfx = "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers"
+          try { Set-ItemProperty -Path $gfx -Name "HwSchMode" -Value 2 } catch {}
+          try { Set-ItemProperty -Path $gfx -Name "TdrLevel" -Value 0 } catch {}
+          $mmcss = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"
+          try { Set-ItemProperty -Path $mmcss -Name "NetworkThrottleQuota" -Value 0xFFFFFFFF } catch {}
+          try { Set-ItemProperty -Path "$mmcss\Tasks" -Name "Network" -Value 8 -Type DWord } catch {}
+          Write-Host "[OK] RDP/GPU/MMCSS"
 
-      - name: Check system resources
-        run: |
-          $os = Get-CimInstance Win32_OperatingSystem
-          $cpu = Get-CimInstance Win32_Processor
+          # 8. Game Mode + DWM
+          $gameBar = "HKCU:\Software\Microsoft\GameBar"
+          if (-not (Test-Path $gameBar)) { New-Item -Path $gameBar -Force | Out-Null }
+          Set-ItemProperty -Path $gameBar -Name "AutoGameModeEnabled" -Value 1
+          $dwm = "HKCU:\Software\Microsoft\Windows\DWM"
+          try { Set-ItemProperty -Path $dwm -Name "EnableAeroPeek" -Value 0 } catch {}
+          try { Set-ItemProperty -Path $dwm -Name "AlwaysHibernateThumbnails" -Value 0 } catch {}
+          Write-Host "[OK] Game Mode"
 
-          $totalGB = [math]::Round(
-            $os.TotalVisibleMemorySize / 1MB, 2
-          )
+          # 9. Flush DNS only
+          # REMOVED: EmptyWorkingSet loop on every process
+          # That loop was forcing every process's working set to the pagefile,
+          # causing hard page faults on next access — visible as RDP stutter
+          # every minute. Removing it is the biggest single fix here.
+          ipconfig /flushdns | Out-Null
+          Write-Host "[OK] DNS flush (no working-set trim)"
 
-          $freeGB = [math]::Round(
-            $os.FreePhysicalMemory / 1MB, 2
-          )
+          Write-Host "ALL OPTIMIZATIONS APPLIED"
 
-          Write-Host "CPU: $($cpu.Name)"
-          Write-Host "Logical processors: $($cpu.NumberOfLogicalProcessors)"
-          Write-Host "Total RAM: $totalGB GB"
-          Write-Host "Free RAM: $freeGB GB"
-
-      - name: Check Tailscale installation
+      - name: Install + Up Tailscale
+        shell: pwsh
         run: |
           $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
-
           if (-not (Test-Path $ts)) {
-            throw "Install Tailscale on your Windows machine first."
+            $url = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+            $dst = "$env:TEMP\tailscale.msi"
+            Invoke-WebRequest -Uri $url -OutFile $dst
+            Start-Process msiexec.exe -ArgumentList "/i","`"$dst`"","/quiet","/norestart" -Wait
+            Remove-Item $dst -Force
           }
+          & $ts logout | Out-Null
+          & $ts up --authkey "${{ inputs.ts_authkey }}" --hostname "$env:TS_HOSTNAME" --accept-dns=true --accept-routes=true
+          $ip4 = & $ts ip -4 | Select-Object -First 1
+          "TAILSCALE_IP=$ip4" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Tailscale IPv4: $ip4"
 
-          $status = & $ts status
-          if ($LASTEXITCODE -ne 0) {
-            throw "Tailscale is not connected. Check its configuration."
-          }
-
-          Write-Host $status
-
-      - name: Keep runner job active
+      - name: Enable RDP user + firewall
+        shell: pwsh
         run: |
-          $end = (Get-Date).AddMinutes(
-            [int]$env:RUNTIME_MINUTES
-          )
+          $u = $env:RDP_USER
+          $p = $env:RDP_PASS
+          $sec = ConvertTo-SecureString $p -AsPlainText -Force
+          if (-not (Get-LocalUser -Name $u -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name $u -Password $sec -AccountNeverExpires
+            Add-LocalGroupMember -Group "Administrators" -Member $u
+            Add-LocalGroupMember -Group "Remote Desktop Users" -Member $u
+          } else {
+            Set-LocalUser -Name $u -Password $sec -AccountNeverExpires
+            Enable-LocalUser -Name $u
+            Add-LocalGroupMember -Group "Administrators" -Member $u -ErrorAction SilentlyContinue
+            Add-LocalGroupMember -Group "Remote Desktop Users" -Member $u -ErrorAction SilentlyContinue
+          }
+          Set-ItemProperty "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name fDenyTSConnections -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop" | Out-Null
 
+      - name: RDP Low-Lag Tune (server-side + new-user template)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'SilentlyContinue'
+
+          # --- A. Server-side protocol tuning on RDP-Tcp (affects ALL RDP clients) ---
+          $rdpTcp = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
+          Set-ItemProperty $rdpTcp -Name "ColorDepth"             -Type DWord -Value 3   # 16-bit color — biggest bandwidth win
+          Set-ItemProperty $rdpTcp -Name "MaxMonitors"            -Type DWord -Value 1
+          Set-ItemProperty $rdpTcp -Name "fInheritColorDepth"     -Type DWord -Value 1
+          Set-ItemProperty $rdpTcp -Name "fDisableCdm"            -Type DWord -Value 1   # No full-window drag
+          Set-ItemProperty $rdpTcp -Name "fDisableCpm"            -Type DWord -Value 1   # No desktop wallpaper on RDP
+          Set-ItemProperty $rdpTcp -Name "fDisableCursorBlink"     -Type DWord -Value 1
+          Set-ItemProperty $rdpTcp -Name "fDisableCursorShadow"   -Type DWord -Value 1
+          Set-ItemProperty $rdpTcp -Name "fDisableThemes"         -Type DWord -Value 1
+          Set-ItemProperty $rdpTcp -Name "fDisableMenuAnim"       -Type DWord -Value 1
+          Set-ItemProperty $rdpTcp -Name "fDisableClip"          -Type DWord -Value 0   # KEEP clipboard
+          Set-ItemProperty $rdpTcp -Name "fDisableAudioCapture"   -Type DWord -Value 1   # No mic redirect
+          Set-ItemProperty $rdpTcp -Name "fDisablePNP"            -Type DWord -Value 1   # No PnP redirect
+          Set-ItemProperty $rdpTcp -Name "fDisablePrinterRedir"   -Type DWord -Value 1
+
+          # --- B. Session timeouts — never auto-disconnect ---
+          Set-ItemProperty $rdpTcp -Name "MaxIdleTime"          -Type DWord -Value 0
+          Set-ItemProperty $rdpTcp -Name "MaxDisconnectionTime" -Type DWord -Value 0
+          Set-ItemProperty $rdpTcp -Name "MaxConnectionTime"    -Type DWord -Value 0
+
+          # --- C. TS Policies — refuse H.264 software encode (no GPU on Actions runners; H.264 sw is a CPU pig) ---
+          $ts = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
+          New-Item -Path $ts -Force | Out-Null
+          Set-ItemProperty $ts -Name "AVC444ModePreferred"        -Type DWord -Value 0
+          Set-ItemProperty $ts -Name "AVCHardwareEncodePreferred" -Type DWord -Value 0
+          Set-ItemProperty $ts -Name "bEnumerateHWBeforeSW"        -Type DWord -Value 0
+          Set-ItemProperty $ts -Name "bUseRDPFile"                 -Type DWord -Value 0
+          Set-ItemProperty $ts -Name "fEnableVirtualizedGraphics" -Type DWord -Value 0
+          Set-ItemProperty $ts -Name "bDisableRemoteDesktopAntiAlias" -Type DWord -Value 1
+          Set-ItemProperty $ts -Name "SelectTransport"            -Type DWord -Value 1   # TCP + UDP (UDP = lower latency)
+
+          # --- D. RDP service up + automatic ---
+          Set-Service -Name "TermService" -StartupType Automatic
+          Start-Service -Name "TermService"
+
+          # --- E. New-user template (C:\Users\Default\NTUSER.DAT) — RDP user inherits on first logon ---
+          $defHive = "C:\Users\Default\NTUSER.DAT"
+          if (Test-Path $defHive) {
+            reg load HKU\TempDefault $defHive | Out-Null
+            try {
+              $base = "Registry::HKEY_USERS\TempDefault"
+
+              $desk = "$base\Control Panel\Desktop"
+              New-Item -Path $desk -Force | Out-Null
+              Set-ItemProperty $desk -Name "DragFullWindows"     -Value "0"  -Type String
+              Set-ItemProperty $desk -Name "FontSmoothing"       -Value "0"  -Type String
+              Set-ItemProperty $desk -Name "Wallpaper"           -Value ""   -Type String
+              Set-ItemProperty $desk -Name "WallPaperStyle"      -Value "10" -Type String
+              Set-ItemProperty $desk -Name "UserPreferencesMask" -Value ([byte[]](0x90,0x12,0x01,0x80,0x10,0x00,0x00,0x00)) -Type Binary
+
+              $wm = "$base\Control Panel\Desktop\WindowMetrics"
+              New-Item -Path $wm -Force | Out-Null
+              Set-ItemProperty $wm -Name "MinAnimate" -Value "0" -Type String
+
+              $pers = "$base\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+              New-Item -Path $pers -Force | Out-Null
+              Set-ItemProperty $pers -Name "EnableTransparency" -Value 0 -Type DWord
+
+              $vis = "$base\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects"
+              New-Item -Path $vis -Force | Out-Null
+              Set-ItemProperty $vis -Name "VisualFXSetting" -Value 2 -Type DWord
+
+              $adv = "$base\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+              New-Item -Path $adv -Force | Out-Null
+              Set-ItemProperty $adv -Name "TaskbarAnimations" -Value 0 -Type DWord
+              Set-ItemProperty $adv -Name "ListviewAlpha"      -Value 0 -Type DWord
+
+              $dwm = "$base\Software\Microsoft\Windows\DWM"
+              New-Item -Path $dwm -Force | Out-Null
+              Set-ItemProperty $dwm -Name "EnableAeroPeek"              -Value 0 -Type DWord
+              Set-ItemProperty $dwm -Name "AlwaysHibernateThumbnails"   -Value 0 -Type DWord
+            } finally {
+              [GC]::Collect()
+              [GC]::WaitForPendingFinalizers()
+              reg unload HKU\TempDefault | Out-Null
+            }
+            Write-Host "[OK] New-user template tuned"
+          } else {
+            Write-Host "[WARN] Default user hive not found"
+          }
+
+          Write-Host "[OK] RDP low-lag tune applied"
+
+      - name: Display Hardware Info
+        shell: pwsh
+        run: |
+          $cpu = Get-CimInstance Win32_Processor
+          $ram = Get-CimInstance Win32_ComputerSystem
+          $totalRAM = [math]::Round($ram.TotalPhysicalMemory / 1GB, 2)
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          Write-Host "RAM (GB): $totalRAM"
+          Write-Host "Processor: $($cpu.Name)"
+          Write-Host "Cores: $($cpu.NumberOfLogicalProcessors)"
+
+      - name: Keep alive
+        shell: pwsh
+        run: |
+          $mins = [int]"${{ env.RUNTIME_MINUTES }}"
+          $end = (Get-Date).AddMinutes($mins)
           while ((Get-Date) -lt $end) {
-            $remaining = [math]::Ceiling(
-              ($end - (Get-Date)).TotalMinutes
-            )
-
-            Write-Host "Session active. Remaining minutes: $remaining"
             Start-Sleep -Seconds 60
           }
-
-          Write-Host "Requested runtime completed."
