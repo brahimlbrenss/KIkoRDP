@@ -1155,29 +1155,3 @@ jobs:
             $pingJob | Remove-Job -Force -ErrorAction SilentlyContinue
           }
 
-# ============================================================================
-# REAL FIX — Self-hosted FR VPS runner setup (when you're done waiting on ISP)
-# ============================================================================
-#
-# 1. Get a VPS in France: OVH / Scaleway / Hetzner-Frankfurt, €3-5/mo, 4GB+ RAM, Windows Server 2022 image
-#    (Hetzner doesn't offer Windows on cloud — use OVH FR or Scaleway FR)
-#
-# 2. On the VPS, install GitHub Actions runner:
-#      - Settings → Actions → Runners → New self-hosted runner → Windows
-#      - Label it: fr-vps
-#      - Run as service
-#
-# 3. Install Tailscale on the VPS, join your tailnet
-#
-# 4. Enable RDP on the VPS (same steps this workflow does)
-#
-# 5. Flip workflow input: use_self_hosted_fr = true
-#    Now runs-on: fr-vps → runner is in France, Algeria→France ~30-50ms instead of 100-150ms to US
-#
-# 6. OPTIONAL: host a private Tailscale DERP on the same VPS so relay fallback
-#    doesn't go through Tailscale's default Frankfurt relay (still FR but at least
-#    your own). See Tailscale docs: Custom DERP Server
-#
-# Without step 1-3, the workflow can only tune the runner side. The night
-# congestion is on Algeria's undersea cables + Tailscale's DERP region routing.
-# Tuning the runner helps ~20%. Moving the runner helps ~80%.
