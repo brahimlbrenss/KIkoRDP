@@ -304,6 +304,22 @@ jobs:
           "TAILSCALE_IP=$ip4" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "Tailscale IPv4: $ip4"
 
+          # Confirm home DERP relay — should be Madrid (mad) per netcheck (68.5ms nearest).
+          # Tailscale auto-picks nearest; no client-side flag forces a region.
+          # To pin Madrid deterministically (survives a runner geo change) you must set
+          # the tailnet ACL derpMap server-side via the API — global, affects all devices.
+          Start-Sleep -Seconds 3   # let the daemon settle before netcheck
+          $nc = & $ts netcheck 2>&1 | Out-String
+          Write-Host "--- tailscale netcheck ---"
+          Write-Host $nc
+          $home = ""
+          if ($nc -match 'Nearest DERP:\s*(\S+)') { $home = $Matches[1] }
+          "TS_DERP=$home" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Home DERP relay: $home"
+          if ($home -and $home -notmatch '^mad') {
+            Write-Warning "Expected Madrid (mad), got '$home'. RDP-over-Tailscale may use a non-Madrid relay this run."
+          }
+
       - name: Enable RDP user + firewall
         shell: pwsh
         run: |
@@ -419,6 +435,7 @@ jobs:
           $ram = Get-CimInstance Win32_ComputerSystem
           $totalRAM = [math]::Round($ram.TotalPhysicalMemory / 1GB, 2)
           Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          Write-Host "Home DERP:    $env:TS_DERP"
           Write-Host "RAM (GB): $totalRAM"
           Write-Host "Processor: $($cpu.Name)"
           Write-Host "Cores: $($cpu.NumberOfLogicalProcessors)"
