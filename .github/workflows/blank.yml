@@ -199,7 +199,6 @@ jobs:
         run: |
           $ErrorActionPreference = 'SilentlyContinue'
 
-          # 1. Power plan
           powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
           powercfg /change monitor-timeout-ac 0
           powercfg /change standby-timeout-ac 0
@@ -208,7 +207,6 @@ jobs:
           powercfg /hibernate off
           Write-Host "[OK] Power plan"
 
-          # 2. Defender off (best-effort)
           try { Set-MpPreference -DisableRealtimeMonitoring $true } catch {}
           try { Set-MpPreference -DisableBehaviorMonitoring $true } catch {}
           try { Set-MpPreference -DisableIOAVProtection $true } catch {}
@@ -220,7 +218,6 @@ jobs:
           try { Set-Service -Name WinDefend -StartupType Disabled } catch {}
           Write-Host "[OK] Defender best-effort"
 
-          # 3. Heavy services off
           $svcs = @(
             'SysMain','WSearch','DiagTrack','dmwappushservice',
             'WdiServiceHost','WdiSystemHost','MapsBroker','lfsvc',
@@ -236,14 +233,12 @@ jobs:
           }
           Write-Host "[OK] Services"
 
-          # 4. Windows Update off
           foreach ($s in @('wuauserv','UsoSvc','WaaSMedicSvc','Bits','DoSvc')) {
             try { Stop-Service -Name $s -Force } catch {}
             try { Set-Service -Name $s -StartupType Disabled } catch {}
           }
           Write-Host "[OK] WU off"
 
-          # 5. TCP tuning — experimental autotuning for max throughput on congested links
           netsh int tcp set global rss=enabled
           netsh int tcp set global autotuninglevel=experimental
           netsh int tcp set global timestamps=disabled
@@ -265,7 +260,6 @@ jobs:
           }
           Write-Host "[OK] TCP"
 
-          # 6. UI strip
           $pers = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
           if (-not (Test-Path $pers)) { New-Item -Path $pers -Force | Out-Null }
           Set-ItemProperty -Path $pers -Name "EnableTransparency" -Value 0
@@ -283,7 +277,6 @@ jobs:
           Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "Wallpaper" -Value ""
           Write-Host "[OK] UI strip"
 
-          # 7. RDP + GPU + MMCSS
           $rdpTcp = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
           Set-ItemProperty -Path $rdpTcp -Name "fMouseClicksDisabled" -Value 0
           Set-ItemProperty -Path $rdpTcp -Name "LatencySensitive" -Value 1
@@ -305,7 +298,6 @@ jobs:
           } catch {}
           Write-Host "[OK] RDP/GPU/MMCSS"
 
-          # 8. Game Mode + DWM
           $gameBar = "HKCU:\Software\Microsoft\GameBar"
           if (-not (Test-Path $gameBar)) { New-Item -Path $gameBar -Force | Out-Null }
           Set-ItemProperty -Path $gameBar -Name "AutoGameModeEnabled" -Value 1
@@ -314,9 +306,8 @@ jobs:
           try { Set-ItemProperty -Path $dwm -Name "AlwaysHibernateThumbnails" -Value 0 } catch {}
           Write-Host "[OK] Game Mode"
 
-          # 9. Flush DNS only
           ipconfig /flushdns | Out-Null
-          Write-Host "[OK] DNS flush (no working-set trim)"
+          Write-Host "[OK] DNS flush"
 
           Write-Host "ALL OPTIMIZATIONS APPLIED"
 
@@ -337,8 +328,6 @@ jobs:
           "TAILSCALE_IP=$ip4" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "Tailscale IPv4: $ip4"
 
-          # --- netcheck: Tailscale auto-picks lowest-latency DERP. we capture + parse
-          #     it so the info step can show what was chosen.
           Write-Host "--- tailscale netcheck (raw) ---"
           $nc = & $ts netcheck 2>&1 | Out-String
           Write-Host $nc
@@ -373,7 +362,6 @@ jobs:
           Write-Host "Nearest DERP auto-selected: $derpName ($derpCode)"
           Write-Host "Top-3 DERP latency: $derpLatency"
 
-          # optional FR exit node
           $exit = $env:TS_EXIT_NODE_INPUT.Trim()
           if ($exit.Length -gt 0) {
             Write-Host "Setting exit-node: $exit"
@@ -410,7 +398,6 @@ jobs:
           $cd = [int]$env:COLOR_DEPTH
           Write-Host "Color depth selected: $cd"
 
-          # --- A. Server-side protocol tuning on RDP-Tcp ---
           $rdpTcp = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
           Set-ItemProperty $rdpTcp -Name "ColorDepth"             -Type DWord -Value $cd
           Set-ItemProperty $rdpTcp -Name "MaxMonitors"            -Type DWord -Value 1
@@ -436,12 +423,10 @@ jobs:
           Set-ItemProperty $rdpTcp -Name "SecurityLayer"          -Type DWord -Value 1
           Set-ItemProperty $rdpTcp -Name "fDisableFontSmoothingCache" -Type DWord -Value 0
 
-          # --- B. Session timeouts ---
           Set-ItemProperty $rdpTcp -Name "MaxIdleTime"          -Type DWord -Value 0
           Set-ItemProperty $rdpTcp -Name "MaxDisconnectionTime" -Type DWord -Value 0
           Set-ItemProperty $rdpTcp -Name "MaxConnectionTime"    -Type DWord -Value 0
 
-          # --- C. TS Policies ---
           $ts = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
           New-Item -Path $ts -Force | Out-Null
           Set-ItemProperty $ts -Name "AVC444ModePreferred"        -Type DWord -Value 0
@@ -455,11 +440,9 @@ jobs:
           Set-ItemProperty $ts -Name "MaxUserMonitors"            -Type DWord -Value 1
           Set-ItemProperty $ts -Name "MaxMonitorResolution"       -Type DWord -Value 1
 
-          # --- D. RDP service ---
           Set-Service -Name "TermService" -StartupType Automatic
           Start-Service -Name "TermService"
 
-          # --- E. New-user template ---
           $defHive = "C:\Users\Default\NTUSER.DAT"
           if (Test-Path $defHive) {
             reg load HKU\TempDefault $defHive | Out-Null
@@ -504,7 +487,6 @@ jobs:
             Write-Host "[WARN] Default user hive not found"
           }
 
-          # --- F. TCP kernel params ---
           $tcpParams = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
           Set-ItemProperty $tcpParams -Name "Tcp1323Opts"        -Type DWord -Value 1
           Set-ItemProperty $tcpParams -Name "TcpWindowSize"      -Type DWord -Value 64240
@@ -561,7 +543,6 @@ jobs:
           & $ts netcheck
           Write-Host ""
           Write-Host "================================================================"
-          Write-Host ""
 
       - name: Keep alive (with periodic Tailscale NAT keepalive)
         shell: pwsh
@@ -569,7 +550,6 @@ jobs:
           $mins = [int]"${{ env.RUNTIME_MINUTES }}"
           $end = (Get-Date).AddMinutes($mins)
           $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
-          # ping tailnet every 20s to keep NAT pinhole open + prevent DERP fallback at night
           $pingJob = Start-Job -ScriptBlock {
             param($ts)
             while ($true) {
