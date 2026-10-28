@@ -43,6 +43,10 @@ on:
         description: "CRD PIN (6-12 digits)"
         required: false
         default: "123456"
+      pin_madrid_derp:
+        description: "Pin tailnet DERP to Madrid only (global, affects ALL devices)"
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -78,7 +82,7 @@ jobs:
           $multi = if ($n -gt 1) { '1' } else { '0' }
           "multi=$multi" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
-      - name: Pin tailnet DERP map to Madrid + Paris
+      - name: Pin tailnet DERP map to Madrid only
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -87,34 +91,34 @@ jobs:
           $pair = "${apiKey}:"
           $b64  = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($pair))
           $hdrs = @{ Authorization = "Basic $b64"; Accept = "application/json" }
-
-          # 1. Fetch the default DERP map and null every region except mad + par.
-          #    Leaving mad/par OUT of the regions dict entirely would inherit the
-          #    default URL for them; setting the others to null disables them.
-          $defaultMap = Invoke-RestMethod -Uri "https://controlplane.tailscale.com/derpmap/default" -Headers @{}
-          $keep = @('mad','par')
-          $regions = @{}
-          foreach ($p in $defaultMap.regions.PSObject.Properties) {
-            if ($keep -notcontains $p.Value.RegionCode) {
-              $regions[$p.Name] = $null
-            }
-          }
-          Write-Host "Disabling $($regions.Count) DERP regions, keeping: $($keep -join ', ')"
-
-          # 2. GET current tailnet ACL — preserve everything He has, only touch derpMap.
           $getUri = "https://api.tailscale.com/api/v2/tailnet/$tailnet/acl"
           $cur = Invoke-RestMethod -Uri $getUri -Headers $hdrs
 
-          # 3. Patch derpMap. Use a PSCustomObject so we don't break the rest of the payload.
-          $cur | Add-Member -NotePropertyName derpMap -NotePropertyValue ([PSCustomObject]@{ regions = $regions }) -Force
+          $pin = '${{ inputs.pin_madrid_derp }}' -match '^(?i:true|1|yes|on)$'
 
-          # 4. POST back. The ACL API accepts the same shape it returns.
+          if ($pin) {
+            # Null every default region except mad. Setting a region to null disables it
+            # (Tailscale ACL derpMap convention) while leaving the default URL intact for mad.
+            $defaultMap = Invoke-RestMethod -Uri "https://controlplane.tailscale.com/derpmap/default" -Headers @{}
+            $keep = @('mad')
+            $regions = @{}
+            foreach ($p in $defaultMap.regions.PSObject.Properties) {
+              if ($keep -notcontains $p.Value.RegionCode) { $regions[$p.Name] = $null }
+            }
+            Write-Host "Pinning: disabling $($regions.Count) DERP regions, keeping: $($keep -join ', ')"
+            $cur | Add-Member -NotePropertyName derpMap -NotePropertyValue ([PSCustomObject]@{ regions = $regions }) -Force
+          } else {
+            # Unpin: drop the derpMap field so Tailscale falls back to all default regions.
+            $cur.PSObject.Properties.Remove('derpMap') | Out-Null
+            Write-Host "Unpinning: removing custom derpMap (all default regions restored)."
+          }
+
           $body = $cur | ConvertTo-Json -Depth 30 -Compress
           $postHdrs = $hdrs.Clone()
           $postHdrs['Content-Type'] = 'application/json'
           try {
             Invoke-RestMethod -Uri $getUri -Method POST -Headers $postHdrs -Body $body -ErrorAction Stop | Out-Null
-            Write-Host "[OK] tailnet derpMap pinned to Madrid + Paris (global — affects all devices)"
+            Write-Host "[OK] tailnet derpMap $(if ($pin) { 'pinned to Madrid only' } else { 'unpinned' }) (global — affects all devices)"
           } catch {
             $resp = $_.Exception.Response
             if ($resp) {
