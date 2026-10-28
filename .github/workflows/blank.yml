@@ -304,21 +304,21 @@ jobs:
           "TAILSCALE_IP=$ip4" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "Tailscale IPv4: $ip4"
 
-          # Confirm home DERP relay — should be Madrid (mad) per netcheck (68.5ms nearest).
-          # Tailscale auto-picks nearest; no client-side flag forces a region.
-          # To pin Madrid deterministically (survives a runner geo change) you must set
-          # the tailnet ACL derpMap server-side via the API — global, affects all devices.
+          # Log the runner's nearest DERP. NOTE: this is the runner's own home DERP,
+          # NOT necessarily the relay used for the RDP session. For a relayed
+          # Tailscale connection the relay is chosen by the dialing peer's home DERP
+          # — when His machine (Madrid, 68.5ms) dials the runner, Madrid is the relay
+          # regardless of where the runner landed. So a LA-nearest runner is fine.
+          # To pin Madrid globally (every device, every session) set tailnet ACL
+          # derpMap server-side via the API — global, affects all devices.
           Start-Sleep -Seconds 3   # let the daemon settle before netcheck
           $nc = & $ts netcheck 2>&1 | Out-String
           Write-Host "--- tailscale netcheck ---"
           Write-Host $nc
-          $home = ""
-          if ($nc -match 'Nearest DERP:\s*(\S+)') { $home = $Matches[1] }
-          "TS_DERP=$home" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          Write-Host "Home DERP relay: $home"
-          if ($home -and $home -notmatch '^mad') {
-            Write-Warning "Expected Madrid (mad), got '$home'. RDP-over-Tailscale may use a non-Madrid relay this run."
-          }
+          $homeDerp = ""
+          if ($nc -match 'Nearest DERP:\s*(\S+)') { $homeDerp = $Matches[1] }
+          "TS_DERP=$homeDerp" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Runner nearest DERP: $homeDerp"
 
       - name: Enable RDP user + firewall
         shell: pwsh
