@@ -16,6 +16,616 @@ on:
         required: true
         default: "tskey-auth-kxup96o8Hf11CNTRL-Njw8q82nUpjCwreTYU3MpjtazQP9SYy4G"
       ts_exit_node:
+        description: "Tailscale exit-node IP/hostname in France (leave empty if none)"
+        required: false
+        default: ""
+      quick_test:
+        description: "Run 5-minute test"
+        type: boolean
+        default: false
+      runtime_minutes:
+        description: "Runtime [MAX: 359]"
+        required: false
+        default: "359"
+      do_purge:
+        description: "Purge bullet* devices at start (single instance only)"
+        required: false
+        default: "true"
+      cycles:
+        description: "0=stop after A; N=handoffs left incl this run"
+        required: false
+        default: "0"
+      rdp_count:
+        description: "How many RDP instances (1-10) [ignored if CRD provided]"
+        required: false
+        default: "1"
+      crd_code:
+        description: "Paste raw CRD code (4/0AV...). If provided -> single instance."
+        required: false
+        default: ""
+      crd_pin:
+        description: "CRD PIN (6-12 digits)"
+        required: false
+        default: "123456"
+      color_depth:
+        description: "RDP color depth: 1=8bit 2=15bit 3=16bit 4=24bit 5=32bit"
+        required: false
+        default: "1"
+      use_self_hosted_fr:
+        description: "Use self-hosted FR runner (set up separately on OVH/Scaleway VPS)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  actions: write
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.mk.outputs.matrix }}
+      multi: ${{ steps.mk.outputs.multi }}
+    steps:
+      - id: mk
+        shell: pwsh
+        run: |
+          $crd = '${{ inputs.crd_code }}'.Trim()
+          if ($crd.Length -gt 0) {
+            $n = 1
+          } else {
+            $n = [int]'${{ inputs.rdp_count }}'
+            if ($n -lt 1) { $n = 1 }
+            if ($n -gt 10) { $n = 10 }
+          }
+
+          $inc = @()
+          for ($i = 1; $i -le $n; $i++) { $inc += @{ id = $i } }
+          $json = @{ include = $inc } | ConvertTo-Json -Compress
+          "matrix=$json" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          $multi = if ($n -gt 1) { '1' } else { '0' }
+          "multi=$multi" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+  rdp:
+    needs: setup
+    runs-on: ${{ inputs.use_self_hosted_fr == 'true' && 'fr-vps' || 'windows-2022' }}
+    strategy:
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+      max-parallel: 10
+    timeout-minutes: 360
+    env:
+      RDP_USER: RDP
+      RDP_PASS: ahmedD-7899
+      CRD_CODE_INPUT: ${{ inputs.crd_code }}
+      CRD_PIN_INPUT: ${{ inputs.crd_pin }}
+      RDP_COUNT_INPUT: ${{ inputs.rdp_count }}
+      QUICK_TEST_INPUT: ${{ inputs.quick_test }}
+      RUNTIME_INPUT: ${{ inputs.runtime_minutes }}
+      TS_EXIT_NODE_INPUT: ${{ inputs.ts_exit_node }}
+      COLOR_DEPTH_INPUT: ${{ inputs.color_depth }}
+
+    steps:
+      - name: Set CRD flag
+        shell: pwsh
+        run: |
+          $crd = $env:CRD_CODE_INPUT.Trim()
+          if ($crd.Length -gt 0) {
+            "CRD_ENABLED=1" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          } else {
+            "CRD_ENABLED=0" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          }
+          Write-Host "CRD_ENABLED=$([int]($crd.Length -gt 0))"
+
+      - name: Install Chrome Remote Desktop Host (if missing)
+        if: env.CRD_ENABLED == '1'
+        shell: pwsh
+        run: |
+          $exe = "${Env:PROGRAMFILES(X86)}\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe"
+          if (-not (Test-Path $exe)) {
+            $exePath = "$env:TEMP\chromeremotedesktophost.exe"
+            $ok = $false
+            try {
+              Invoke-WebRequest -Uri "https://dl.google.com/support/remote_assistance/ChromotingHostSetup.exe" -OutFile $exePath -ErrorAction Stop
+              Start-Process -FilePath $exePath -ArgumentList "/silent","/install" -Wait
+              Remove-Item $exePath -Force
+              $ok = $true
+            } catch {
+              Write-Host "EXE installer failed: $($_.Exception.Message)"
+            }
+            if (-not $ok) {
+              $msi = "$env:TEMP\chromeremotedesktophost.msi"
+              Invoke-WebRequest -Uri "https://dl.google.com/edgedl/chrome-remote-desktop/chromeremotedesktophost.msi" -OutFile $msi -ErrorAction Stop
+              Start-Process msiexec.exe -ArgumentList "/i","`"$msi`"","/quiet","/norestart" -Wait
+              Remove-Item $msi -Force
+            }
+          }
+
+      - name: Run Chrome Remote Desktop with PIN
+        if: env.CRD_ENABLED == '1'
+        shell: pwsh
+        run: |
+          $raw = $env:CRD_CODE_INPUT.Trim()
+          $pin = $env:CRD_PIN_INPUT.Trim()
+          if ($pin -notmatch '^\d{6,12}$') {
+            Write-Error "crd_pin must be 6-12 digits."
+            exit 1
+          }
+          $starter = "${Env:PROGRAMFILES(X86)}\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe"
+          $redir = "https://remotedesktop.google.com/_/oauthredirect"
+          $name  = $Env:COMPUTERNAME
+          $args  = @("--code=`"$raw`"","--redirect-url=`"$redir`"","--name=`"$name`"","--pin=`"$pin`"")
+          Start-Process -FilePath $starter -ArgumentList $args
+
+      - name: Decide hostname + runtime
+        shell: pwsh
+        run: |
+          $n = [int]$env:RDP_COUNT_INPUT
+          if ($n -gt 1) {
+            $hn = "bullet${{ matrix.id }}"
+          } else {
+            $hn = "bullet"
+          }
+          "TS_HOSTNAME=$hn" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+          function Yes($v){ "$v" -match '^(?i:true|1|yes|on)$' }
+          function IntOr($v,$d){ if("$v" -match '^\d+$'){ [int]$v } else { [int]$d } }
+          $runtime = IntOr($env:RUNTIME_INPUT, 359)
+          if (Yes($env:QUICK_TEST_INPUT)) { $runtime = 5 }
+          if (-not (Yes($env:QUICK_TEST_INPUT)) -and $runtime -lt 6) { $runtime = 359 }
+          if ($runtime -gt 360) { $runtime = 359 }
+          "RUNTIME_MINUTES=$runtime" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+          $cd = IntOr($env:COLOR_DEPTH_INPUT, 1)
+          if ($cd -lt 1) { $cd = 1 }
+          if ($cd -gt 5) { $cd = 5 }
+          "COLOR_DEPTH=$cd" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Ensure High-Performance CPU
+        shell: pwsh
+        run: |
+          $cpu = Get-CimInstance Win32_Processor
+          $name = $cpu.Name.Trim()
+          if ($name -match "Pentium|Celeron|Atom|Core i3|i5") {
+              Write-Error "Aborting run: weak CPU ($name)."
+              exit 1
+          }
+
+      - name: MAX Performance Tune
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'SilentlyContinue'
+
+          # 1. Power plan
+          powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
+          powercfg /change monitor-timeout-ac 0
+          powercfg /change standby-timeout-ac 0
+          powercfg /change hibernate-timeout-ac 0
+          powercfg /change disk-timeout-ac 0
+          powercfg /hibernate off
+          Write-Host "[OK] Power plan"
+
+          # 2. Defender off (best-effort)
+          try { Set-MpPreference -DisableRealtimeMonitoring $true } catch {}
+          try { Set-MpPreference -DisableBehaviorMonitoring $true } catch {}
+          try { Set-MpPreference -DisableIOAVProtection $true } catch {}
+          try { Set-MpPreference -DisableScriptScanning $true } catch {}
+          try { Set-MpPreference -MAPSReporting Disabled } catch {}
+          try { Set-MpPreference -SubmitSamplesConsent NeverSend } catch {}
+          try { Add-MpPreference -ExclusionPath "C:\" } catch {}
+          try { Stop-Service -Name WinDefend -Force } catch {}
+          try { Set-Service -Name WinDefend -StartupType Disabled } catch {}
+          Write-Host "[OK] Defender best-effort"
+
+          # 3. Heavy services off
+          $svcs = @(
+            'SysMain','WSearch','DiagTrack','dmwappushservice',
+            'WdiServiceHost','WdiSystemHost','MapsBroker','lfsvc',
+            'RetailDemo','RemoteRegistry','Fax','SCardSvr',
+            'SensorService','PhoneSvc','CscService','DPS','DusmSvc',
+            'Themes','WpnService','Spooler','PrintNotify',
+            'FontCache3.0.0.0','WMPNetworkSvc','WbioSrvc','SmsRouter',
+            'wlidsvc','TrkWks','ScDeviceEnum','HidBth','BthAvctpSvc'
+          )
+          foreach ($s in $svcs) {
+            try { Stop-Service -Name $s -Force } catch {}
+            try { Set-Service -Name $s -StartupType Disabled } catch {}
+          }
+          Write-Host "[OK] Services"
+
+          # 4. Windows Update off
+          foreach ($s in @('wuauserv','UsoSvc','WaaSMedicSvc','Bits','DoSvc')) {
+            try { Stop-Service -Name $s -Force } catch {}
+            try { Set-Service -Name $s -StartupType Disabled } catch {}
+          }
+          Write-Host "[OK] WU off"
+
+          # 5. TCP tuning — experimental autotuning for max throughput on congested links
+          netsh int tcp set global rss=enabled
+          netsh int tcp set global autotuninglevel=experimental
+          netsh int tcp set global timestamps=disabled
+          netsh int tcp set global sack=enabled
+          netsh int tcp set global netrto=300
+          netsh int tcp set heuristics disabled
+          netsh int tcp set global initialRto=2
+          netsh int tcp set global rsc=enabled
+          netsh int tcp set global ecncapability=enabled
+          netsh int tcp set global nonsackrttresiliency=disabled
+          Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | ForEach-Object {
+            try { Set-NetAdapterAdvancedProperty -Name $_.Name -RegistryKeyword "*TcpAckFrequency" -RegistryValue 1 } catch {}
+            try { Set-NetAdapterAdvancedProperty -Name $_.Name -RegistryKeyword "*TCPNoDelay" -RegistryValue 1 } catch {}
+            try { Set-NetAdapterAdvancedProperty -Name $_.Name -RegistryKeyword "*FlowControl" -RegistryValue 0 } catch {}
+            try { Set-NetAdapterAdvancedProperty -Name $_.Name -RegistryKeyword "*InterruptModeration" -RegistryValue 0 } catch {}
+            try { Set-NetAdapterAdvancedProperty -Name $_.Name -RegistryKeyword "*JumboPacket" -RegistryValue 1514 } catch {}
+            try { Set-NetAdapterAdvancedProperty -Name $_.Name -RegistryKeyword "*RSS" -RegistryValue 1 } catch {}
+            try { Set-NetAdapterAdvancedProperty -Name $_.Name -RegistryKeyword "*NumRssQueues" -RegistryValue 4 } catch {}
+          }
+          Write-Host "[OK] TCP"
+
+          # 6. UI strip
+          $pers = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+          if (-not (Test-Path $pers)) { New-Item -Path $pers -Force | Out-Null }
+          Set-ItemProperty -Path $pers -Name "EnableTransparency" -Value 0
+          Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "UserPreferencesMask" -Value ([byte[]](0x90,0x12,0x01,0x80,0x10,0x00,0x00,0x00))
+          Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "DragFullWindows" -Value "0"
+          Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "FontSmoothing" -Value "0"
+          Set-ItemProperty -Path "HKCU:\Control Panel\Desktop\WindowMetrics" -Name "MinAnimate" -Value "0"
+          $vis = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects"
+          if (-not (Test-Path $vis)) { New-Item -Path $vis -Force | Out-Null }
+          Set-ItemProperty -Path $vis -Name "VisualFXSetting" -Value 2 -Type DWord
+          $adv = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+          if (-not (Test-Path $adv)) { New-Item -Path $adv -Force | Out-Null }
+          Set-ItemProperty -Path $adv -Name "TaskbarAnimations" -Value 0 -Type DWord
+          Set-ItemProperty -Path $adv -Name "ListviewAlpha" -Value 0 -Type DWord
+          Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "Wallpaper" -Value ""
+          Write-Host "[OK] UI strip"
+
+          # 7. RDP + GPU + MMCSS
+          $rdpTcp = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
+          Set-ItemProperty -Path $rdpTcp -Name "fMouseClicksDisabled" -Value 0
+          Set-ItemProperty -Path $rdpTcp -Name "LatencySensitive" -Value 1
+          $gfx = "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers"
+          try { Set-ItemProperty -Path $gfx -Name "HwSchMode" -Value 2 } catch {}
+          try { Set-ItemProperty -Path $gfx -Name "TdrLevel" -Value 0 } catch {}
+          $mmcss = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"
+          try { Set-ItemProperty -Path $mmcss -Name "NetworkThrottleQuota" -Value 0xFFFFFFFF } catch {}
+          try { Set-ItemProperty -Path "$mmcss\Tasks" -Name "Network" -Value 8 -Type DWord } catch {}
+          try {
+            $netTask = "$mmcss\Tasks\Network"
+            Set-ItemProperty -Path $netTask -Name "Affinity" -Type DWord -Value 0
+            Set-ItemProperty -Path $netTask -Name "Background Only" -Type String -Value "False"
+            Set-ItemProperty -Path $netTask -Name "Clock Rate" -Type DWord -Value 10000
+            Set-ItemProperty -Path $netTask -Name "GPU Priority" -Type DWord -Value 8
+            Set-ItemProperty -Path $netTask -Name "Priority" -Type DWord -Value 8
+            Set-ItemProperty -Path $netTask -Name "Scheduling Category" -Type String -Value "High"
+            Set-ItemProperty -Path $netTask -Name "SFIO Priority" -Type String -Value "High"
+          } catch {}
+          Write-Host "[OK] RDP/GPU/MMCSS"
+
+          # 8. Game Mode + DWM
+          $gameBar = "HKCU:\Software\Microsoft\GameBar"
+          if (-not (Test-Path $gameBar)) { New-Item -Path $gameBar -Force | Out-Null }
+          Set-ItemProperty -Path $gameBar -Name "AutoGameModeEnabled" -Value 1
+          $dwm = "HKCU:\Software\Microsoft\Windows\DWM"
+          try { Set-ItemProperty -Path $dwm -Name "EnableAeroPeek" -Value 0 } catch {}
+          try { Set-ItemProperty -Path $dwm -Name "AlwaysHibernateThumbnails" -Value 0 } catch {}
+          Write-Host "[OK] Game Mode"
+
+          # 9. Flush DNS only
+          ipconfig /flushdns | Out-Null
+          Write-Host "[OK] DNS flush (no working-set trim)"
+
+          Write-Host "ALL OPTIMIZATIONS APPLIED"
+
+      - name: Install + Up Tailscale
+        shell: pwsh
+        run: |
+          $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          if (-not (Test-Path $ts)) {
+            $url = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+            $dst = "$env:TEMP\tailscale.msi"
+            Invoke-WebRequest -Uri $url -OutFile $dst
+            Start-Process msiexec.exe -ArgumentList "/i","`"$dst`"","/quiet","/norestart" -Wait
+            Remove-Item $dst -Force
+          }
+          & $ts logout | Out-Null
+          & $ts up --authkey "${{ inputs.ts_authkey }}" --hostname "$env:TS_HOSTNAME" --accept-dns=true --accept-routes=true --reset
+          $ip4 = & $ts ip -4 | Select-Object -First 1
+          "TAILSCALE_IP=$ip4" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Tailscale IPv4: $ip4"
+
+          # --- netcheck: Tailscale auto-picks lowest-latency DERP. we capture + parse
+          #     it so the info step can show what was chosen.
+          Write-Host "--- tailscale netcheck (raw) ---"
+          $nc = & $ts netcheck 2>&1 | Out-String
+          Write-Host $nc
+
+          $derpName = "unknown"
+          $derpCode = "unknown"
+          $derpLatency = "n/a"
+          $m = [regex]::Match($nc, 'Nearest DERP:\s*([^\s].*?)\s+\(([a-z\-]+)\)')
+          if ($m.Success) {
+            $derpName = $m.Groups[1].Value.Trim()
+            $derpCode = $m.Groups[2].Value.Trim()
+          }
+          $latencies = @()
+          foreach ($line in ($nc -split "`n")) {
+            $lm = [regex]::Match($line, '^\s*-\s*(.+?):\s*([0-9]+\.?[0-9]*)\s*ms')
+            if ($lm.Success) {
+              $latencies += [pscustomobject]@{
+                Region = $lm.Groups[1].Value.Trim()
+                LatencyMs = [double]$lm.Groups[2].Value
+              }
+            }
+          }
+          $top3 = $latencies | Sort-Object LatencyMs | Select-Object -First 3
+          if ($top3) {
+            $derpLatency = ($top3 | ForEach-Object { "$($_.Region)=$($_.LatencyMs)ms" }) -join " | "
+          }
+
+          "DERP_NAME=$derpName" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "DERP_CODE=$derpCode" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "DERP_LATENCY=$derpLatency" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "DERP_NEAREST=$derpName ($derpCode)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Nearest DERP auto-selected: $derpName ($derpCode)"
+          Write-Host "Top-3 DERP latency: $derpLatency"
+
+          # optional FR exit node
+          $exit = $env:TS_EXIT_NODE_INPUT.Trim()
+          if ($exit.Length -gt 0) {
+            Write-Host "Setting exit-node: $exit"
+            & $ts set --exit-node "$exit" --exit-node-allow-lan-access=true
+            Write-Host "[OK] Exit node set"
+          } else {
+            Write-Host "[INFO] No exit node. Tailscale uses direct P2P if NAT allows, else DERP relay."
+          }
+
+      - name: Enable RDP user + firewall
+        shell: pwsh
+        run: |
+          $u = $env:RDP_USER
+          $p = $env:RDP_PASS
+          $sec = ConvertTo-SecureString $p -AsPlainText -Force
+          if (-not (Get-LocalUser -Name $u -ErrorAction SilentlyContinue)) {
+            New-LocalUser -Name $u -Password $sec -AccountNeverExpires
+            Add-LocalGroupMember -Group "Administrators" -Member $u
+            Add-LocalGroupMember -Group "Remote Desktop Users" -Member $u
+          } else {
+            Set-LocalUser -Name $u -Password $sec -AccountNeverExpires
+            Enable-LocalUser -Name $u
+            Add-LocalGroupMember -Group "Administrators" -Member $u -ErrorAction SilentlyContinue
+            Add-LocalGroupMember -Group "Remote Desktop Users" -Member $u -ErrorAction SilentlyContinue
+          }
+          Set-ItemProperty "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name fDenyTSConnections -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop" | Out-Null
+
+      - name: RDP Low-Lag Tune (server-side + new-user template)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'SilentlyContinue'
+
+          $cd = [int]$env:COLOR_DEPTH
+          Write-Host "Color depth selected: $cd"
+
+          # --- A. Server-side protocol tuning on RDP-Tcp ---
+          $rdpTcp = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
+          Set-ItemProperty $rdpTcp -Name "ColorDepth"             -Type DWord -Value $cd
+          Set-ItemProperty $rdpTcp -Name "MaxMonitors"            -Type DWord -Value 1
+          Set-ItemProperty $rdpTcp -Name "fInheritColorDepth"     -Type DWord -Value 1
+          Set-ItemProperty $rdpTcp -Name "fDisableCdm"            -Type DWord -Value 1
+          Set-ItemProperty $rdpTcp -Name "fDisableCpm"            -Type DWord -Value 1
+          Set-ItemProperty $rdpTcp -Name "fDisableCursorBlink"    -Type DWord -Value 1
+          Set-ItemProperty $rdpTcp -Name "fDisableCursorShadow"   -Type DWord -Value 1
+          Set-ItemProperty $rdpTcp -Name "fDisableThemes"         -Type DWord -Value 1
+          Set-ItemProperty $rdpTcp -Name "fDisableMenuAnim"       -Type DWord -Value 1
+          Set-ItemProperty $rdpTcp -Name "fDisableClip"           -Type DWord -Value 0
+          Set-ItemProperty $rdpTcp -Name "fDisableAudioCapture"   -Type DWord -Value 1
+          Set-ItemProperty $rdpTcp -Name "fDisablePNP"            -Type DWord -Value 1
+          Set-ItemProperty $rdpTcp -Name "fDisablePrinterRedir"   -Type DWord -Value 1
+          Set-ItemProperty $rdpTcp -Name "fDisableLPT"            -Type DWord -Value 1
+          Set-ItemProperty $rdpTcp -Name "fDisableCOM"            -Type DWord -Value 1
+          Set-ItemProperty $rdpTcp -Name "fDisableSmartcard"      -Type DWord -Value 1
+          Set-ItemProperty $rdpTcp -Name "MinInputSendInterval"   -Type DWord -Value 0
+          Set-ItemProperty $rdpTcp -Name "InteractiveDelay"        -Type DWord -Value 0
+          Set-ItemProperty $rdpTcp -Name "KeepAliveInterval"      -Type DWord -Value 1
+          Set-ItemProperty $rdpTcp -Name "KeepAliveTimeout"       -Type DWord -Value 1
+          Set-ItemProperty $rdpTcp -Name "MinEncryptionLevel"     -Type DWord -Value 1
+          Set-ItemProperty $rdpTcp -Name "SecurityLayer"          -Type DWord -Value 1
+          Set-ItemProperty $rdpTcp -Name "fDisableFontSmoothingCache" -Type DWord -Value 0
+
+          # --- B. Session timeouts ---
+          Set-ItemProperty $rdpTcp -Name "MaxIdleTime"          -Type DWord -Value 0
+          Set-ItemProperty $rdpTcp -Name "MaxDisconnectionTime" -Type DWord -Value 0
+          Set-ItemProperty $rdpTcp -Name "MaxConnectionTime"    -Type DWord -Value 0
+
+          # --- C. TS Policies ---
+          $ts = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
+          New-Item -Path $ts -Force | Out-Null
+          Set-ItemProperty $ts -Name "AVC444ModePreferred"        -Type DWord -Value 0
+          Set-ItemProperty $ts -Name "AVCHardwareEncodePreferred" -Type DWord -Value 0
+          Set-ItemProperty $ts -Name "bEnumerateHWBeforeSW"       -Type DWord -Value 0
+          Set-ItemProperty $ts -Name "bUseRDPFile"                 -Type DWord -Value 0
+          Set-ItemProperty $ts -Name "fEnableVirtualizedGraphics"  -Type DWord -Value 0
+          Set-ItemProperty $ts -Name "bDisableRemoteDesktopAntiAlias" -Type DWord -Value 1
+          Set-ItemProperty $ts -Name "SelectTransport"            -Type DWord -Value 2
+          Set-ItemProperty $ts -Name "bDisableTSAnimations"       -Type DWord -Value 1
+          Set-ItemProperty $ts -Name "MaxUserMonitors"            -Type DWord -Value 1
+          Set-ItemProperty $ts -Name "MaxMonitorResolution"       -Type DWord -Value 1
+
+          # --- D. RDP service ---
+          Set-Service -Name "TermService" -StartupType Automatic
+          Start-Service -Name "TermService"
+
+          # --- E. New-user template ---
+          $defHive = "C:\Users\Default\NTUSER.DAT"
+          if (Test-Path $defHive) {
+            reg load HKU\TempDefault $defHive | Out-Null
+            try {
+              $base = "Registry::HKEY_USERS\TempDefault"
+              $desk = "$base\Control Panel\Desktop"
+              New-Item -Path $desk -Force | Out-Null
+              Set-ItemProperty $desk -Name "DragFullWindows"     -Value "0"  -Type String
+              Set-ItemProperty $desk -Name "FontSmoothing"       -Value "0"  -Type String
+              Set-ItemProperty $desk -Name "Wallpaper"           -Value ""   -Type String
+              Set-ItemProperty $desk -Name "WallPaperStyle"      -Value "10" -Type String
+              Set-ItemProperty $desk -Name "UserPreferencesMask" -Value ([byte[]](0x90,0x12,0x01,0x80,0x10,0x00,0x00,0x00)) -Type Binary
+
+              $wm = "$base\Control Panel\Desktop\WindowMetrics"
+              New-Item -Path $wm -Force | Out-Null
+              Set-ItemProperty $wm -Name "MinAnimate" -Value "0" -Type String
+
+              $pers = "$base\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+              New-Item -Path $pers -Force | Out-Null
+              Set-ItemProperty $pers -Name "EnableTransparency" -Value 0 -Type DWord
+
+              $vis = "$base\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects"
+              New-Item -Path $vis -Force | Out-Null
+              Set-ItemProperty $vis -Name "VisualFXSetting" -Value 2 -Type DWord
+
+              $adv = "$base\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+              New-Item -Path $adv -Force | Out-Null
+              Set-ItemProperty $adv -Name "TaskbarAnimations" -Value 0 -Type DWord
+              Set-ItemProperty $adv -Name "ListviewAlpha"     -Value 0 -Type DWord
+
+              $dwm = "$base\Software\Microsoft\Windows\DWM"
+              New-Item -Path $dwm -Force | Out-Null
+              Set-ItemProperty $dwm -Name "EnableAeroPeek"            -Value 0 -Type DWord
+              Set-ItemProperty $dwm -Name "AlwaysHibernateThumbnails" -Value 0 -Type DWord
+            } finally {
+              [GC]::Collect()
+              [GC]::WaitForPendingFinalizers()
+              reg unload HKU\TempDefault | Out-Null
+            }
+            Write-Host "[OK] New-user template tuned"
+          } else {
+            Write-Host "[WARN] Default user hive not found"
+          }
+
+          # --- F. TCP kernel params ---
+          $tcpParams = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
+          Set-ItemProperty $tcpParams -Name "Tcp1323Opts"        -Type DWord -Value 1
+          Set-ItemProperty $tcpParams -Name "TcpWindowSize"      -Type DWord -Value 64240
+          Set-ItemProperty $tcpParams -Name "TcpRecvSegmentSize" -Type DWord -Value 1460
+          Set-ItemProperty $tcpParams -Name "TcpSendSegmentSize" -Type DWord -Value 1460
+          Set-ItemProperty $tcpParams -Name "TCPDelAckTicks"     -Type DWord -Value 0
+          Set-ItemProperty $tcpParams -Name "TcpAckFreq"         -Type DWord -Value 1
+          Set-ItemProperty $tcpParams -Name "DefaultTTL"         -Type DWord -Value 64
+          Set-ItemProperty $tcpParams -Name "KeepAliveTime"      -Type DWord -Value 5000
+          Set-ItemProperty $tcpParams -Name "KeepAliveInterval"  -Type DWord -Value 1000
+          Write-Host "[OK] TCP kernel params"
+
+          Write-Host "[OK] RDP low-lag tune applied"
+
+      - name: Display ARDP Info
+        shell: pwsh
+        run: |
+          $cpu = Get-CimInstance Win32_Processor
+          $ram = Get-CimInstance Win32_ComputerSystem
+          $totalRAM = [math]::Round($ram.TotalPhysicalMemory / 1GB, 2)
+          $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          $pubIp = (Invoke-WebRequest -Uri "https://api.ipify.org" -UseBasicParsing -TimeoutSec 5).Content.Trim()
+          $geo = ""
+          try {
+            $g = Invoke-RestMethod -Uri "https://ipinfo.io/$pubIp/json" -TimeoutSec 5
+            $geo = "$($g.city), $($g.region), $($g.country) [$($g.org)]"
+          } catch { $geo = "(geo lookup failed)" }
+
+          Write-Host ""
+          Write-Host "================================================================"
+          Write-Host "                       ARDP SESSION INFO"
+          Write-Host "================================================================"
+          Write-Host "  Runner public IP   : $pubIp"
+          Write-Host "  Runner geo         : $geo"
+          Write-Host "  Processor          : $($cpu.Name)"
+          Write-Host "  Cores (logical)    : $($cpu.NumberOfLogicalProcessors)"
+          Write-Host "  RAM (GB)           : $totalRAM"
+          Write-Host "  ----------------------------------------------------------------"
+          Write-Host "  RDP user           : $env:RDP_USER"
+          Write-Host "  RDP password       : $env:RDP_PASS"
+          Write-Host "  Connect via        : mstsc /v:$env:TAILSCALE_IP"
+          Write-Host "  Color depth        : $env:COLOR_DEPTH (1=8bit 3=16bit 4=24bit)"
+          Write-Host "  Runtime (min)      : $env:RUNTIME_MINUTES"
+          Write-Host "  ----------------------------------------------------------------"
+          Write-Host "  Tailscale hostname : $env:TS_HOSTNAME"
+          Write-Host "  Tailscale IPv4     : $env:TAILSCALE_IP"
+          Write-Host "  Nearest DERP       : $env:DERP_NEAREST"
+          Write-Host "  Top-3 DERP latency : $env:DERP_LATENCY"
+          Write-Host "  ----------------------------------------------------------------"
+          Write-Host "  tailscale status (full):"
+          & $ts status
+          Write-Host ""
+          Write-Host "  tailscale netcheck (full):"
+          & $ts netcheck
+          Write-Host ""
+          Write-Host "================================================================"
+          Write-Host ""
+
+      - name: Keep alive (with periodic Tailscale NAT keepalive)
+        shell: pwsh
+        run: |
+          $mins = [int]"${{ env.RUNTIME_MINUTES }}"
+          $end = (Get-Date).AddMinutes($mins)
+          $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          # ping tailnet every 20s to keep NAT pinhole open + prevent DERP fallback at night
+          $pingJob = Start-Job -ScriptBlock {
+            param($ts)
+            while ($true) {
+              try { & $ts ping --until-direct=false --timeout=3s "100.64.0.1" 2>$null | Out-Null } catch {}
+              Start-Sleep -Seconds 20
+            }
+          } -ArgumentList $ts
+
+          try {
+            while ((Get-Date) -lt $end) {
+              Start-Sleep -Seconds 60
+            }
+          } finally {
+            $pingJob | Stop-Job -ErrorAction SilentlyContinue
+            $pingJob | Remove-Job -Force -ErrorAction SilentlyContinue
+          }
+
+# ============================================================================
+# REAL FIX — Self-hosted FR VPS runner setup (when you're done waiting on ISP)
+# ============================================================================
+#
+# 1. Get a VPS in France: OVH / Scaleway / Hetzner-Frankfurt, €3-5/mo, 4GB+ RAM, Windows Server 2022
+#    (Hetzner doesn't offer Windows on cloud — use OVH FR or Scaleway FR)
+#
+# 2. On the VPS, install GitHub Actions runner:
+#      - Settings → Actions → Runners → New self-hosted runner → Windows
+#      - Label it: fr-vps
+#      - Run as service
+#
+# 3. Install Tailscale on the VPS, join your tailnet
+#
+# 4. Enable RDP on the VPS (same steps this workflow does)
+#
+# 5. Flip workflow input: use_self_hosted_fr = true
+#    runs-on: fr-vps → runner is in France, Algeria→France ~30-50ms instead of 100-150ms to US
+#
+# Without steps 1-3, the workflow only tunes the runner side. Night congestion
+# is on Algeria's undersea cables + Tailscale's DERP region routing. Runner tuning
+# helps ~20%. Moving the runner helps ~80%.name: RDP 16RAM
+
+on:
+  workflow_dispatch:
+    inputs:
+      ts_tailnet:
+        description: "Tailscale tailnet (e.g. you@gmail.com)"
+        required: true
+        default: "brahimlbrenss.github"
+      ts_api_key:
+        description: "Tailscale API key (device admin, no Bearer)"
+        required: true
+        default: "tskey-api-kroYEtuGFB21CNTRL-cZXDWpMQP4QcSLNcKA8X4QcwjUhuwU41"
+      ts_authkey:
+        description: "Tailscale Auth key (reusable or ephemeral)"
+        required: true
+        default: "tskey-auth-kxup96o8Hf11CNTRL-Njw8q82nUpjCwreTYU3MpjtazQP9SYy4G"
+      ts_exit_node:
         description: "Tailscale exit-node IP/hostname in France (leave empty if none). Routes runner egress through FR if set."
         required: false
         default: ""
