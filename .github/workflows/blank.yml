@@ -15,6 +15,10 @@ on:
         description: "Tailscale Auth key (reusable or ephemeral)"
         required: true
         default: "tskey-auth-kxup96o8Hf11CNTRL-Njw8q82nUpjCwreTYU3MpjtazQP9SYy4G"
+      ts_exit_node:
+        description: "Tailscale exit-node IP/hostname in France (leave empty if none). Routes runner egress through FR if set."
+        required: false
+        default: ""
       quick_test:
         description: "Run 5-minute test"
         type: boolean
@@ -43,10 +47,14 @@ on:
         description: "CRD PIN (6-12 digits)"
         required: false
         default: "123456"
-      pin_madrid_derp:
-        description: "Pin tailnet DERP to Madrid only (global, affects ALL devices)"
+      color_depth:
+        description: "RDP color depth: 1=8bit 2=15bit 3=16bit 4=24bit 5=32bit"
+        required: false
+        default: "1"
+      use_self_hosted_fr:
+        description: "Use self-hosted FR runner (set up separately on OVH/Scaleway VPS)"
         type: boolean
-        default: true
+        default: false
 
 permissions:
   contents: read
@@ -82,58 +90,11 @@ jobs:
           $multi = if ($n -gt 1) { '1' } else { '0' }
           "multi=$multi" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
-      - name: Pin tailnet DERP map to Madrid only
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $tailnet = '${{ inputs.ts_tailnet }}'
-          $apiKey  = '${{ inputs.ts_api_key }}'
-          $pair = "${apiKey}:"
-          $b64  = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($pair))
-          $hdrs = @{ Authorization = "Basic $b64"; Accept = "application/json" }
-          $getUri = "https://api.tailscale.com/api/v2/tailnet/$tailnet/acl"
-          $cur = Invoke-RestMethod -Uri $getUri -Headers $hdrs
-
-          $pin = '${{ inputs.pin_madrid_derp }}' -match '^(?i:true|1|yes|on)$'
-
-          if ($pin) {
-            # Null every default region except mad. Setting a region to null disables it
-            # (Tailscale ACL derpMap convention) while leaving the default URL intact for mad.
-            $defaultMap = Invoke-RestMethod -Uri "https://controlplane.tailscale.com/derpmap/default" -Headers @{}
-            $keep = @('mad')
-            $regions = @{}
-            foreach ($p in $defaultMap.regions.PSObject.Properties) {
-              if ($keep -notcontains $p.Value.RegionCode) { $regions[$p.Name] = $null }
-            }
-            Write-Host "Pinning: disabling $($regions.Count) DERP regions, keeping: $($keep -join ', ')"
-            $cur | Add-Member -NotePropertyName derpMap -NotePropertyValue ([PSCustomObject]@{ regions = $regions }) -Force
-          } else {
-            # Unpin: drop the derpMap field so Tailscale falls back to all default regions.
-            $cur.PSObject.Properties.Remove('derpMap') | Out-Null
-            Write-Host "Unpinning: removing custom derpMap (all default regions restored)."
-          }
-
-          $body = $cur | ConvertTo-Json -Depth 30 -Compress
-          $postHdrs = $hdrs.Clone()
-          $postHdrs['Content-Type'] = 'application/json'
-          try {
-            Invoke-RestMethod -Uri $getUri -Method POST -Headers $postHdrs -Body $body -ErrorAction Stop | Out-Null
-            Write-Host "[OK] tailnet derpMap $(if ($pin) { 'pinned to Madrid only' } else { 'unpinned' }) (global — affects all devices)"
-          } catch {
-            $resp = $_.Exception.Response
-            if ($resp) {
-              $sr = New-Object IO.StreamReader($resp.GetResponseStream())
-              $errBody = $sr.ReadToEnd()
-              Write-Error "ACL POST failed: HTTP $($resp.StatusCode.value__)" -TargetObject $errBody
-            } else {
-              Write-Error "ACL POST failed: $($_.Exception.Message)"
-            }
-            exit 1
-          }
-
   rdp:
     needs: setup
-    runs-on: windows-2022
+    # --- REAL FIX: flip use_self_hosted_fr=true after you set up a FR VPS runner.
+    # Self-hosted runner label = "fr-vps". See README comment block at bottom.
+    runs-on: ${{ inputs.use_self_hosted_fr == 'true' && 'fr-vps' || 'windows-2022' }}
     strategy:
       matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
       max-parallel: 10
@@ -146,6 +107,8 @@ jobs:
       RDP_COUNT_INPUT: ${{ inputs.rdp_count }}
       QUICK_TEST_INPUT: ${{ inputs.quick_test }}
       RUNTIME_INPUT: ${{ inputs.runtime_minutes }}
+      TS_EXIT_NODE_INPUT: ${{ inputs.ts_exit_node }}
+      COLOR_DEPTH_INPUT: ${{ inputs.color_depth }}
 
     steps:
       - name: Set CRD flag
@@ -218,6 +181,11 @@ jobs:
           if ($runtime -gt 360) { $runtime = 359 }
           "RUNTIME_MINUTES=$runtime" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+          $cd = IntOr($env:COLOR_DEPTH_INPUT, 1)
+          if ($cd -lt 1) { $cd = 1 }
+          if ($cd -gt 5) { $cd = 5 }
+          "COLOR_DEPTH=$cd" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Ensure High-Performance CPU
         shell: pwsh
         run: |
@@ -254,7 +222,7 @@ jobs:
           try { Set-Service -Name WinDefend -StartupType Disabled } catch {}
           Write-Host "[OK] Defender best-effort"
 
-          # 3. Heavy services off (expanded list — these don't matter on a cloud RDP runner)
+          # 3. Heavy services off
           $svcs = @(
             'SysMain','WSearch','DiagTrack','dmwappushservice',
             'WdiServiceHost','WdiSystemHost','MapsBroker','lfsvc',
@@ -277,21 +245,29 @@ jobs:
           }
           Write-Host "[OK] WU off"
 
-          # 5. TCP tuning — keep InterruptModeration ON for cloud virtual NIC
+          # 5. TCP tuning — experimental autotuning for max throughput on congested links
           netsh int tcp set global rss=enabled
-          netsh int tcp set global autotuninglevel=normal
+          netsh int tcp set global autotuninglevel=experimental   # was: normal — bigger recv window for high-BDP path
           netsh int tcp set global timestamps=disabled
+          netsh int tcp set global sack=enabled                    # NEW: selective ACK survives loss better
+          netsh int tcp set global netrto=300                     # NEW: retransmit timeout floor
           netsh int tcp set heuristics disabled
           netsh int tcp set global initialRto=2
+          netsh int tcp set global rsc=enabled                     # NEW: recv segment coalescing
+          netsh int tcp set global ecncapability=enabled           # NEW: explicit congestion notif
           netsh int tcp set global nonsackrttresiliency=disabled
           Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | ForEach-Object {
             try { Set-NetAdapterAdvancedProperty -Name $_.Name -RegistryKeyword "*TcpAckFrequency" -RegistryValue 1 } catch {}
             try { Set-NetAdapterAdvancedProperty -Name $_.Name -RegistryKeyword "*TCPNoDelay" -RegistryValue 1 } catch {}
             try { Set-NetAdapterAdvancedProperty -Name $_.Name -RegistryKeyword "*FlowControl" -RegistryValue 0 } catch {}
+            try { Set-NetAdapterAdvancedProperty -Name $_.Name -RegistryKeyword "*InterruptModeration" -RegistryValue 0 } catch {}  # NEW: lower latency, more CPU
+            try { Set-NetAdapterAdvancedProperty -Name $_.Name -RegistryKeyword "*JumboPacket" -RegistryValue 1514 } catch {}
+            try { Set-NetAdapterAdvancedProperty -Name $_.Name -RegistryKeyword "*RSS" -RegistryValue 1 } catch {}
+            try { Set-NetAdapterAdvancedProperty -Name $_.Name -RegistryKeyword "*NumRssQueues" -RegistryValue 4 } catch {}
           }
           Write-Host "[OK] TCP"
 
-          # 6. UI strip (applied to GHA runner user)
+          # 6. UI strip
           $pers = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
           if (-not (Test-Path $pers)) { New-Item -Path $pers -Force | Out-Null }
           Set-ItemProperty -Path $pers -Name "EnableTransparency" -Value 0
@@ -319,6 +295,17 @@ jobs:
           $mmcss = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"
           try { Set-ItemProperty -Path $mmcss -Name "NetworkThrottleQuota" -Value 0xFFFFFFFF } catch {}
           try { Set-ItemProperty -Path "$mmcss\Tasks" -Name "Network" -Value 8 -Type DWord } catch {}
+          # NEW: MMCSS Network task priority boost — RDP traffic gets scheduled first
+          try {
+            $netTask = "$mmcss\Tasks\Network"
+            Set-ItemProperty -Path $netTask -Name "Affinity" -Type DWord -Value 0
+            Set-ItemProperty -Path $netTask -Name "Background Only" -Type String -Value "False"
+            Set-ItemProperty -Path $netTask -Name "Clock Rate" -Type DWord -Value 10000
+            Set-ItemProperty -Path $netTask -Name "GPU Priority" -Type DWord -Value 8
+            Set-ItemProperty -Path $netTask -Name "Priority" -Type DWord -Value 8
+            Set-ItemProperty -Path $netTask -Name "Scheduling Category" -Type String -Value "High"
+            Set-ItemProperty -Path $netTask -Name "SFIO Priority" -Type String -Value "High"
+          } catch {}
           Write-Host "[OK] RDP/GPU/MMCSS"
 
           # 8. Game Mode + DWM
@@ -331,10 +318,6 @@ jobs:
           Write-Host "[OK] Game Mode"
 
           # 9. Flush DNS only
-          # REMOVED: EmptyWorkingSet loop on every process
-          # That loop was forcing every process's working set to the pagefile,
-          # causing hard page faults on next access — visible as RDP stutter
-          # every minute. Removing it is the biggest single fix here.
           ipconfig /flushdns | Out-Null
           Write-Host "[OK] DNS flush (no working-set trim)"
 
@@ -352,26 +335,24 @@ jobs:
             Remove-Item $dst -Force
           }
           & $ts logout | Out-Null
-          & $ts up --authkey "${{ inputs.ts_authkey }}" --hostname "$env:TS_HOSTNAME" --accept-dns=true --accept-routes=true
+          & $ts up --authkey "${{ inputs.ts_authkey }}" --hostname "$env:TS_HOSTNAME" --accept-dns=true --accept-routes=true --reset
           $ip4 = & $ts ip -4 | Select-Object -First 1
           "TAILSCALE_IP=$ip4" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "Tailscale IPv4: $ip4"
 
-          # Log the runner's nearest DERP. NOTE: this is the runner's own home DERP,
-          # NOT necessarily the relay used for the RDP session. For a relayed
-          # Tailscale connection the relay is chosen by the dialing peer's home DERP
-          # — when His machine (Madrid, 68.5ms) dials the runner, Madrid is the relay
-          # regardless of where the runner landed. So a LA-nearest runner is fine.
-          # To pin Madrid globally (every device, every session) set tailnet ACL
-          # derpMap server-side via the API — global, affects all devices.
-          Start-Sleep -Seconds 3   # let the daemon settle before netcheck
-          $nc = & $ts netcheck 2>&1 | Out-String
+          # NEW: netcheck — tells you exactly which DERP region is closest + latency
           Write-Host "--- tailscale netcheck ---"
-          Write-Host $nc
-          $homeDerp = ""
-          if ($nc -match 'Nearest DERP:\s*(\S+)') { $homeDerp = $Matches[1] }
-          "TS_DERP=$homeDerp" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          Write-Host "Runner nearest DERP: $homeDerp"
+          & $ts netcheck
+
+          # NEW: optional FR exit node — if you set ts_exit_node, route runner egress through it
+          $exit = $env:TS_EXIT_NODE_INPUT.Trim()
+          if ($exit.Length -gt 0) {
+            Write-Host "Setting exit-node: $exit"
+            & $ts set --exit-node "$exit" --exit-node-allow-lan-access=true
+            Write-Host "[OK] Exit node set"
+          } else {
+            Write-Host "[INFO] No exit node configured. Set ts_exit_node in workflow inputs to route through FR VPS."
+          }
 
       - name: Enable RDP user + firewall
         shell: pwsh
@@ -397,49 +378,78 @@ jobs:
         run: |
           $ErrorActionPreference = 'SilentlyContinue'
 
-          # --- A. Server-side protocol tuning on RDP-Tcp (affects ALL RDP clients) ---
+          $cd = [int]$env:COLOR_DEPTH
+          # color depth mapping: 1=8bit 2=15bit 3=16bit 4=24bit 5=32bit
+          # 8-bit is brutal but lowest bandwidth — use when congestion is bad
+          Write-Host "Color depth selected: $cd"
+
+          # --- A. Server-side protocol tuning on RDP-Tcp ---
           $rdpTcp = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
-          Set-ItemProperty $rdpTcp -Name "ColorDepth"             -Type DWord -Value 3   # 16-bit color — biggest bandwidth win
+          Set-ItemProperty $rdpTcp -Name "ColorDepth"             -Type DWord -Value $cd
           Set-ItemProperty $rdpTcp -Name "MaxMonitors"            -Type DWord -Value 1
           Set-ItemProperty $rdpTcp -Name "fInheritColorDepth"     -Type DWord -Value 1
           Set-ItemProperty $rdpTcp -Name "fDisableCdm"            -Type DWord -Value 1   # No full-window drag
-          Set-ItemProperty $rdpTcp -Name "fDisableCpm"            -Type DWord -Value 1   # No desktop wallpaper on RDP
-          Set-ItemProperty $rdpTcp -Name "fDisableCursorBlink"     -Type DWord -Value 1
+          Set-ItemProperty $rdpTcp -Name "fDisableCpm"            -Type DWord -Value 1   # No wallpaper
+          Set-ItemProperty $rdpTcp -Name "fDisableCursorBlink"    -Type DWord -Value 1
           Set-ItemProperty $rdpTcp -Name "fDisableCursorShadow"   -Type DWord -Value 1
           Set-ItemProperty $rdpTcp -Name "fDisableThemes"         -Type DWord -Value 1
           Set-ItemProperty $rdpTcp -Name "fDisableMenuAnim"       -Type DWord -Value 1
-          Set-ItemProperty $rdpTcp -Name "fDisableClip"          -Type DWord -Value 0   # KEEP clipboard
-          Set-ItemProperty $rdpTcp -Name "fDisableAudioCapture"   -Type DWord -Value 1   # No mic redirect
-          Set-ItemProperty $rdpTcp -Name "fDisablePNP"            -Type DWord -Value 1   # No PnP redirect
+          Set-ItemProperty $rdpTcp -Name "fDisableClip"           -Type DWord -Value 0   # KEEP clipboard
+          Set-ItemProperty $rdpTcp -Name "fDisableAudioCapture"   -Type DWord -Value 1
+          Set-ItemProperty $rdpTcp -Name "fDisablePNP"            -Type DWord -Value 1
           Set-ItemProperty $rdpTcp -Name "fDisablePrinterRedir"   -Type DWord -Value 1
+          Set-ItemProperty $rdpTcp -Name "fDisableLPT"            -Type DWord -Value 1
+          Set-ItemProperty $rdpTcp -Name "fDisableCOM"            -Type DWord -Value 1
+          Set-ItemProperty $rdpTcp -Name "fDisableSmartcard"      -Type DWord -Value 1
+
+          # NEW: minimum input send interval = 0 = send every keystroke immediately
+          Set-ItemProperty $rdpTcp -Name "MinInputSendInterval"   -Type DWord -Value 0
+          # NEW: interactive delay 0 = no server-side delay on input
+          Set-ItemProperty $rdpTcp -Name "InteractiveDelay"       -Type DWord -Value 0
+          # NEW: keep-alive — keep UDP NAT pinhole open
+          Set-ItemProperty $rdpTcp -Name "KeepAliveInterval"      -Type DWord -Value 1   # every 1 sec
+          Set-ItemProperty $rdpTcp -Name "KeepAliveTimeout"       -Type DWord -Value 1
+          # NEW: min encryption = none to skip encrypt overhead on tailnet (already TLS-protected)
+          Set-ItemProperty $rdpTcp -Name "MinEncryptionLevel"     -Type DWord -Value 1
+          Set-ItemProperty $rdpTcp -Name "SecurityLayer"          -Type DWord -Value 1   # RDP Security Layer = lower CPU
+          # NEW: disable font smoothing cache invalidation traffic
+          Set-ItemProperty $rdpTcp -Name "fDisableFontSmoothingCache" -Type DWord -Value 0
 
           # --- B. Session timeouts — never auto-disconnect ---
           Set-ItemProperty $rdpTcp -Name "MaxIdleTime"          -Type DWord -Value 0
           Set-ItemProperty $rdpTcp -Name "MaxDisconnectionTime" -Type DWord -Value 0
           Set-ItemProperty $rdpTcp -Name "MaxConnectionTime"    -Type DWord -Value 0
 
-          # --- C. TS Policies — refuse H.264 software encode (no GPU on Actions runners; H.264 sw is a CPU pig) ---
+          # --- C. TS Policies — refuse H.264 software encode ---
           $ts = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
           New-Item -Path $ts -Force | Out-Null
           Set-ItemProperty $ts -Name "AVC444ModePreferred"        -Type DWord -Value 0
           Set-ItemProperty $ts -Name "AVCHardwareEncodePreferred" -Type DWord -Value 0
-          Set-ItemProperty $ts -Name "bEnumerateHWBeforeSW"        -Type DWord -Value 0
-          Set-ItemProperty $ts -Name "bUseRDPFile"                 -Type DWord -Value 0
+          Set-ItemProperty $ts -Name "bEnumerateHWBeforeSW"       -Type DWord -Value 0
+          Set-ItemProperty $ts -Name "bUseRDPFile"                -Type DWord -Value 0
           Set-ItemProperty $ts -Name "fEnableVirtualizedGraphics" -Type DWord -Value 0
           Set-ItemProperty $ts -Name "bDisableRemoteDesktopAntiAlias" -Type DWord -Value 1
-          Set-ItemProperty $ts -Name "SelectTransport"            -Type DWord -Value 1   # TCP + UDP (UDP = lower latency)
+          Set-ItemProperty $ts -Name "SelectTransport"            -Type DWord -Value 1   # TCP + UDP
+          # NEW: prefer UDP — explicitly
+          Set-ItemProperty $ts -Name "SelectTransport"            -Type DWord -Value 2   # 2 = prefer UDP, fall back TCP
+          # NEW: disable wallpaper cache traffic
+          Set-ItemProperty $ts -Name "fDisableCpm"                -Type DWord -Value 1
+          # NEW: disable animations in TS policy
+          Set-ItemProperty $ts -Name "bDisableTSAnimations"       -Type DWord -Value 1
+          # NEW: optimize for low bandwidth
+          Set-ItemProperty $ts -Name "MaxUserMonitors"            -Type DWord -Value 1
+          Set-ItemProperty $ts -Name "MaxMonitorResolution"       -Type DWord -Value 1   # cap at 1920x1080
 
           # --- D. RDP service up + automatic ---
           Set-Service -Name "TermService" -StartupType Automatic
           Start-Service -Name "TermService"
 
-          # --- E. New-user template (C:\Users\Default\NTUSER.DAT) — RDP user inherits on first logon ---
+          # --- E. New-user template ---
           $defHive = "C:\Users\Default\NTUSER.DAT"
           if (Test-Path $defHive) {
             reg load HKU\TempDefault $defHive | Out-Null
             try {
               $base = "Registry::HKEY_USERS\TempDefault"
-
               $desk = "$base\Control Panel\Desktop"
               New-Item -Path $desk -Force | Out-Null
               Set-ItemProperty $desk -Name "DragFullWindows"     -Value "0"  -Type String
@@ -463,12 +473,12 @@ jobs:
               $adv = "$base\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
               New-Item -Path $adv -Force | Out-Null
               Set-ItemProperty $adv -Name "TaskbarAnimations" -Value 0 -Type DWord
-              Set-ItemProperty $adv -Name "ListviewAlpha"      -Value 0 -Type DWord
+              Set-ItemProperty $adv -Name "ListviewAlpha"     -Value 0 -Type DWord
 
               $dwm = "$base\Software\Microsoft\Windows\DWM"
               New-Item -Path $dwm -Force | Out-Null
-              Set-ItemProperty $dwm -Name "EnableAeroPeek"              -Value 0 -Type DWord
-              Set-ItemProperty $dwm -Name "AlwaysHibernateThumbnails"   -Value 0 -Type DWord
+              Set-ItemProperty $dwm -Name "EnableAeroPeek"            -Value 0 -Type DWord
+              Set-ItemProperty $dwm -Name "AlwaysHibernateThumbnails" -Value 0 -Type DWord
             } finally {
               [GC]::Collect()
               [GC]::WaitForPendingFinalizers()
@@ -479,6 +489,19 @@ jobs:
             Write-Host "[WARN] Default user hive not found"
           }
 
+          # --- F. NEW: bump RDP-Tcp socket buffer sizes (Win32 kernel)
+          $tcpParams = "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters"
+          Set-ItemProperty $tcpParams -Name "Tcp1323Opts"        -Type DWord -Value 1     # window scaling on
+          Set-ItemProperty $tcpParams -Name "TcpWindowSize"      -Type DWord -Value 64240 # 64K recv window
+          Set-ItemProperty $tcpParams -Name "TcpRecvSegmentSize" -Type DWord -Value 1460  # MTU-aligned MSS
+          Set-ItemProperty $tcpParams -Name "TcpSendSegmentSize" -Type DWord -Value 1460
+          Set-ItemProperty $tcpParams -Name "TCPDelAckTicks"     -Type DWord -Value 0     # no delayed ACK
+          Set-ItemProperty $tcpParams -Name "TcpAckFreq"         -Type DWord -Value 1     # ACK every segment
+          Set-ItemProperty $tcpParams -Name "DefaultTTL"         -Type DWord -Value 64
+          Set-ItemProperty $tcpParams -Name "KeepAliveTime"      -Type DWord -Value 5000  # 5s keepalive (NAT pinhole)
+          Set-ItemProperty $tcpParams -Name "KeepAliveInterval"  -Type DWord -Value 1000
+          Write-Host "[OK] TCP kernel params"
+
           Write-Host "[OK] RDP low-lag tune applied"
 
       - name: Display Hardware Info
@@ -488,16 +511,63 @@ jobs:
           $ram = Get-CimInstance Win32_ComputerSystem
           $totalRAM = [math]::Round($ram.TotalPhysicalMemory / 1GB, 2)
           Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          Write-Host "Home DERP:    $env:TS_DERP"
           Write-Host "RAM (GB): $totalRAM"
           Write-Host "Processor: $($cpu.Name)"
-          Write-Host "Cores: $($cpu.NumberOfLogicalProcessors)"
+          Write-Host "Cores: $($cpu.NumberOfLogicalProcessifiers)"
+          Write-Host ""
+          Write-Host "--- tailscale status (DZ client should check 'direct' vs 'relay') ---"
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" status
+          Write-Host ""
+          Write-Host "--- tailscale netcheck (DERP region latency) ---"
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" netcheck
 
-      - name: Keep alive
+      - name: Keep alive (with periodic Tailscale NAT keepalive)
         shell: pwsh
         run: |
           $mins = [int]"${{ env.RUNTIME_MINUTES }}"
           $end = (Get-Date).AddMinutes($mins)
-          while ((Get-Date) -lt $end) {
-            Start-Sleep -Seconds 60
+          $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          # NEW: ping the tailnet every 20s to keep NAT pinhole open + prevent DERP fallback at night
+          $pingJob = Start-Job -ScriptBlock {
+            param($ts)
+            while ($true) {
+              try { & $ts ping --until-direct=false --timeout=3s "100.64.0.1" 2>$null | Out-Null } catch {}
+              Start-Sleep -Seconds 20
+            }
+          } -ArgumentList $ts
+
+          try {
+            while ((Get-Date) -lt $end) {
+              Start-Sleep -Seconds 60
+            }
+          } finally {
+            $pingJob | Stop-Job -ErrorAction SilentlyContinue
+            $pingJob | Remove-Job -Force -ErrorAction SilentlyContinue
           }
+
+# ============================================================================
+# REAL FIX — Self-hosted FR VPS runner setup (when you're done waiting on ISP)
+# ============================================================================
+#
+# 1. Get a VPS in France: OVH / Scaleway / Hetzner-Frankfurt, €3-5/mo, 4GB+ RAM, Windows Server 2022 image
+#    (Hetzner doesn't offer Windows on cloud — use OVH FR or Scaleway FR)
+#
+# 2. On the VPS, install GitHub Actions runner:
+#      - Settings → Actions → Runners → New self-hosted runner → Windows
+#      - Label it: fr-vps
+#      - Run as service
+#
+# 3. Install Tailscale on the VPS, join your tailnet
+#
+# 4. Enable RDP on the VPS (same steps this workflow does)
+#
+# 5. Flip workflow input: use_self_hosted_fr = true
+#    Now runs-on: fr-vps → runner is in France, Algeria→France ~30-50ms instead of 100-150ms to US
+#
+# 6. OPTIONAL: host a private Tailscale DERP on the same VPS so relay fallback
+#    doesn't go through Tailscale's default Frankfurt relay (still FR but at least
+#    your own). See Tailscale docs: Custom DERP Server
+#
+# Without step 1-3, the workflow can only tune the runner side. The night
+# congestion is on Algeria's undersea cables + Tailscale's DERP region routing.
+# Tuning the runner helps ~20%. Moving the runner helps ~80%.
