@@ -78,6 +78,55 @@ jobs:
           $multi = if ($n -gt 1) { '1' } else { '0' }
           "multi=$multi" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
+      - name: Pin tailnet DERP map to Madrid + Paris
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tailnet = '${{ inputs.ts_tailnet }}'
+          $apiKey  = '${{ inputs.ts_api_key }}'
+          $pair = "${apiKey}:"
+          $b64  = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($pair))
+          $hdrs = @{ Authorization = "Basic $b64"; Accept = "application/json" }
+
+          # 1. Fetch the default DERP map and null every region except mad + par.
+          #    Leaving mad/par OUT of the regions dict entirely would inherit the
+          #    default URL for them; setting the others to null disables them.
+          $defaultMap = Invoke-RestMethod -Uri "https://controlplane.tailscale.com/derpmap/default" -Headers @{}
+          $keep = @('mad','par')
+          $regions = @{}
+          foreach ($p in $defaultMap.regions.PSObject.Properties) {
+            if ($keep -notcontains $p.Value.RegionCode) {
+              $regions[$p.Name] = $null
+            }
+          }
+          Write-Host "Disabling $($regions.Count) DERP regions, keeping: $($keep -join ', ')"
+
+          # 2. GET current tailnet ACL — preserve everything He has, only touch derpMap.
+          $getUri = "https://api.tailscale.com/api/v2/tailnet/$tailnet/acl"
+          $cur = Invoke-RestMethod -Uri $getUri -Headers $hdrs
+
+          # 3. Patch derpMap. Use a PSCustomObject so we don't break the rest of the payload.
+          $cur | Add-Member -NotePropertyName derpMap -NotePropertyValue ([PSCustomObject]@{ regions = $regions }) -Force
+
+          # 4. POST back. The ACL API accepts the same shape it returns.
+          $body = $cur | ConvertTo-Json -Depth 30 -Compress
+          $postHdrs = $hdrs.Clone()
+          $postHdrs['Content-Type'] = 'application/json'
+          try {
+            Invoke-RestMethod -Uri $getUri -Method POST -Headers $postHdrs -Body $body -ErrorAction Stop | Out-Null
+            Write-Host "[OK] tailnet derpMap pinned to Madrid + Paris (global — affects all devices)"
+          } catch {
+            $resp = $_.Exception.Response
+            if ($resp) {
+              $sr = New-Object IO.StreamReader($resp.GetResponseStream())
+              $errBody = $sr.ReadToEnd()
+              Write-Error "ACL POST failed: HTTP $($resp.StatusCode.value__)" -TargetObject $errBody
+            } else {
+              Write-Error "ACL POST failed: $($_.Exception.Message)"
+            }
+            exit 1
+          }
+
   rdp:
     needs: setup
     runs-on: windows-2022
