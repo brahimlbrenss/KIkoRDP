@@ -211,7 +211,7 @@ jobs:
           try { Set-MpPreference -DisableBehaviorMonitoring $true } catch {}
           try { Set-MpPreference -DisableIOAVProtection $true } catch {}
           try { Set-MpPreference -DisableScriptScanning $true } catch {}
-          try { Set-MpPreference -MAPSReporting Disabled } catch {}
+          try { Set-MpPreference -DisableMAPSReporting Disabled } catch {}
           try { Set-MpPreference -SubmitSamplesConsent NeverSend } catch {}
           try { Add-MpPreference -ExclusionPath "C:\" } catch {}
           try { Stop-Service -Name WinDefend -Force } catch {}
@@ -501,56 +501,18 @@ jobs:
 
           Write-Host "[OK] RDP low-lag tune applied"
 
-      - name: Display ARDP Info
+      - name: Watch low-latency peer + keep alive
         shell: pwsh
         run: |
-          $cpu = Get-CimInstance Win32_Processor
-          $ram = Get-CimInstance Win32_ComputerSystem
-          $totalRAM = [math]::Round($ram.TotalPhysicalMemory / 1GB, 2)
+          $ErrorActionPreference = 'SilentlyContinue'
           $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
-          $pubIp = (Invoke-WebRequest -Uri "https://api.ipify.org" -UseBasicParsing -TimeoutSec 5).Content.Trim()
-          $geo = ""
-          try {
-            $g = Invoke-RestMethod -Uri "https://ipinfo.io/$pubIp/json" -TimeoutSec 5
-            $geo = "$($g.city), $($g.region), $($g.country) [$($g.org)]"
-          } catch { $geo = "(geo lookup failed)" }
-
-          Write-Host ""
-          Write-Host "================================================================"
-          Write-Host "                       ARDP SESSION INFO"
-          Write-Host "================================================================"
-          Write-Host "  Runner public IP   : $pubIp"
-          Write-Host "  Runner geo         : $geo"
-          Write-Host "  Processor          : $($cpu.Name)"
-          Write-Host "  Cores (logical)    : $($cpu.NumberOfLogicalProcessors)"
-          Write-Host "  RAM (GB)           : $totalRAM"
-          Write-Host "  ----------------------------------------------------------------"
-          Write-Host "  RDP user           : $env:RDP_USER"
-          Write-Host "  RDP password       : $env:RDP_PASS"
-          Write-Host "  Connect via        : mstsc /v:$env:TAILSCALE_IP"
-          Write-Host "  Color depth        : $env:COLOR_DEPTH (1=8bit 3=16bit 4=24bit)"
-          Write-Host "  Runtime (min)      : $env:RUNTIME_MINUTES"
-          Write-Host "  ----------------------------------------------------------------"
-          Write-Host "  Tailscale hostname : $env:TS_HOSTNAME"
-          Write-Host "  Tailscale IPv4     : $env:TAILSCALE_IP"
-          Write-Host "  Nearest DERP       : $env:DERP_NEAREST"
-          Write-Host "  Top-3 DERP latency : $env:DERP_LATENCY"
-          Write-Host "  ----------------------------------------------------------------"
-          Write-Host "  tailscale status (full):"
-          & $ts status
-          Write-Host ""
-          Write-Host "  tailscale netcheck (full):"
-          & $ts netcheck
-          Write-Host ""
-          Write-Host "================================================================"
-
-      - name: Keep alive (with periodic Tailscale NAT keepalive)
-        shell: pwsh
-        run: |
           $mins = [int]"${{ env.RUNTIME_MINUTES }}"
           $end = (Get-Date).AddMinutes($mins)
-          $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
-          $pingJob = Start-Job -ScriptBlock {
+          $LATENCY_THRESHOLD_MS = 50   # tune one line: direct or relayed <= this = "low latency"
+
+          # NAT keepalive — keeps the tailnet tunnel warm so P2P direct can establish
+          # runs the whole watch loop, even before any peer is seen
+          $keepaliveJob = Start-Job -ScriptBlock {
             param($ts)
             while ($true) {
               try { & $ts ping --until-direct=false --timeout=3s "100.64.0.1" 2>$null | Out-Null } catch {}
@@ -558,11 +520,79 @@ jobs:
             }
           } -ArgumentList $ts
 
+          $infoShown = $false
           try {
             while ((Get-Date) -lt $end) {
-              Start-Sleep -Seconds 60
+              if (-not $infoShown) {
+                try {
+                  $raw = & $ts status --json 2>$null | Out-String
+                  if ($raw) {
+                    $j = $raw | ConvertFrom-Json
+                    $peers = @()
+                    if ($j.Peer) { $peers = @($j.Peer.PSObject.Properties.Value) }
+                    foreach ($p in $peers) {
+                      if (-not $p.Active) { continue }
+                      if (($p.TxBytes + $p.RxBytes) -eq 0) { continue }
+                      $peerIP = ($p.TailscaleIPs | Select-Object -First 1)
+                      if (-not $peerIP) { continue }
+
+                      $pingOut = & $ts ping --until-direct=false --timeout=3s $peerIP 2>&1 | Out-String
+                      $m = [regex]::Match($pingOut, 'in\s+([0-9]+)\s*ms')
+                      if (-not $m.Success) { continue }
+                      $latency = [int]$m.Groups[1].Value
+                      if ($latency -gt $LATENCY_THRESHOLD_MS) { continue }
+
+                      # low-latency peer confirmed — unlock ARDP info
+                      $cpu = Get-CimInstance Win32_Processor
+                      $ram = Get-CimInstance Win32_ComputerSystem
+                      $totalRAM = [math]::Round($ram.TotalPhysicalMemory / 1GB, 2)
+                      $pubIp = (Invoke-WebRequest -Uri "https://api.ipify.org" -UseBasicParsing -TimeoutSec 5).Content.Trim()
+                      $geo = ""
+                      try {
+                        $g = Invoke-RestMethod -Uri "https://ipinfo.io/$pubIp/json" -TimeoutSec 5
+                        $geo = "$($g.city), $($g.region), $($g.country) [$($g.org)]"
+                      } catch { $geo = "(geo lookup failed)" }
+
+                      $pathKind = if (-not [string]::IsNullOrWhiteSpace($p.CurAddr)) { "DIRECT" } else { "relay $($p.Relay)" }
+
+                      Write-Host ""
+                      Write-Host "================================================================"
+                      Write-Host "                       ARDP SESSION INFO"
+                      Write-Host "  (unlocked: low-latency peer ${latency}ms via $pathKind)"
+                      Write-Host "================================================================"
+                      Write-Host "  Peer               : $($p.HostName) ($peerIP)"
+                      Write-Host "  ----------------------------------------------------------------"
+                      Write-Host "  Runner public IP   : $pubIp"
+                      Write-Host "  Runner geo         : $geo"
+                      Write-Host "  Processor          : $($cpu.Name)"
+                      Write-Host "  Cores (logical)    : $($cpu.NumberOfLogicalProcessors)"
+                      Write-Host "  RAM (GB)           : $totalRAM"
+                      Write-Host "  ----------------------------------------------------------------"
+                      Write-Host "  RDP user           : $env:RDP_USER"
+                      Write-Host "  RDP password       : $env:RDP_PASS"
+                      Write-Host "  Connect via        : mstsc /v:$env:TAILSCALE_IP"
+                      Write-Host "  Color depth        : $env:COLOR_DEPTH (1=8bit 3=16bit 4=24bit)"
+                      Write-Host "  Runtime (min)      : $env:RUNTIME_MINUTES"
+                      Write-Host "  ----------------------------------------------------------------"
+                      Write-Host "  Tailscale hostname : $env:TS_HOSTNAME"
+                      Write-Host "  Tailscale IPv4     : $env:TAILSCALE_IP"
+                      Write-Host "  Nearest DERP       : $env:DERP_NEAREST"
+                      Write-Host "  Top-3 DERP latency : $env:DERP_LATENCY"
+                      Write-Host "  ----------------------------------------------------------------"
+                      Write-Host "  tailscale status (full):"
+                      & $ts status
+                      Write-Host ""
+                      Write-Host "================================================================"
+
+                      $infoShown = $true
+                      break
+                    }
+                  }
+                } catch {}
+              }
+              Start-Sleep -Seconds 15
             }
           } finally {
-            $pingJob | Stop-Job -ErrorAction SilentlyContinue
-            $pingJob | Remove-Job -Force -ErrorAction SilentlyContinue
+            $keepaliveJob | Stop-Job -ErrorAction SilentlyContinue
+            $keepaliveJob | Remove-Job -Force -ErrorAction SilentlyContinue
           }
