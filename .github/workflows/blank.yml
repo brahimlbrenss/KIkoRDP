@@ -539,8 +539,6 @@ jobs:
 
           Write-Host "[OK] File and clipboard redirection enabled"
 
-
-
       - name: Tune display + generate tuned RDP file
         shell: pwsh
         run: |
@@ -549,7 +547,7 @@ jobs:
           # ===== TUNABLES =====
           $DESK_W = 1024
           $DESK_H = 768
-          $BPP    = 8
+          $BPP = 8
           # ====================
 
           # --- 1. Lower the runner's own display resolution ---
@@ -558,13 +556,14 @@ jobs:
             $curH = (Get-CimInstance -ClassName Win32_VideoController).CurrentVerticalResolution
             Write-Host "Current display: ${curW}x${curH}"
 
-            if ((Get-Command Set-DisplayResolution -ErrorAction SilentlyContinue)) {
+            if (Get-Command Set-DisplayResolution -ErrorAction SilentlyContinue) {
               Set-DisplayResolution -Width $DESK_W -Height $DESK_H -Force -ErrorAction SilentlyContinue
             }
 
             $reg = "HKCU:\Control Panel\Desktop"
             Set-ItemProperty $reg -Name "Wallpaper" -Value "" -Type String -ErrorAction SilentlyContinue
-          } catch {
+          }
+          catch {
             Write-Host "Display resolution change skipped: $($_.Exception.Message)"
           }
 
