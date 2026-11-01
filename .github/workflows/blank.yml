@@ -402,7 +402,7 @@ jobs:
           Set-ItemProperty $rdpTcp -Name "ColorDepth"             -Type DWord -Value $cd
           Set-ItemProperty $rdpTcp -Name "MaxMonitors"            -Type DWord -Value 1
           Set-ItemProperty $rdpTcp -Name "fInheritColorDepth"     -Type DWord -Value 1
-          Set-ItemProperty $rdpTcp -Name "fDisableCdm"            -Type DWord -Value 1
+          Set-ItemProperty $rdpTcp -Name "fDisableCdm" -Type DWord -Value 0
           Set-ItemProperty $rdpTcp -Name "fDisableCpm"            -Type DWord -Value 1
           Set-ItemProperty $rdpTcp -Name "fDisableCursorBlink"    -Type DWord -Value 1
           Set-ItemProperty $rdpTcp -Name "fDisableCursorShadow"   -Type DWord -Value 1
@@ -500,6 +500,46 @@ jobs:
           Write-Host "[OK] TCP kernel params"
 
           Write-Host "[OK] RDP low-lag tune applied"
+
+
+      - name: FIX RDP File and Clipboard Redirection
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # Enable drive and file redirection
+          $rdpTcp = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
+
+          Set-ItemProperty $rdpTcp -Name "fDisableCdm" -Type DWord -Value 0
+          Set-ItemProperty $rdpTcp -Name "fDisableClip" -Type DWord -Value 0
+
+          # Remove Group Policy restrictions
+          $policy = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
+
+          if (-not (Test-Path $policy)) {
+              New-Item -Path $policy -Force | Out-Null
+          }
+
+          Set-ItemProperty $policy -Name "fDisableCdm" -Type DWord -Value 0
+          Set-ItemProperty $policy -Name "fDisableClip" -Type DWord -Value 0
+
+          # Verify settings
+          $drive = (Get-ItemProperty $rdpTcp).fDisableCdm
+          $clip = (Get-ItemProperty $rdpTcp).fDisableClip
+
+          Write-Host "========================================"
+          Write-Host "RDP FILE TRANSFER FIX"
+          Write-Host "Drive Redirection: $drive (0 = Enabled)"
+          Write-Host "Clipboard: $clip (0 = Enabled)"
+          Write-Host "========================================"
+
+          if ($drive -ne 0 -or $clip -ne 0) {
+              throw "RDP redirection configuration failed."
+          }
+
+          Write-Host "[OK] File and clipboard redirection enabled"
+
+
 
       - name: Watch low-latency peer + keep alive
         shell: pwsh
