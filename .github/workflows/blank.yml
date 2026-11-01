@@ -541,17 +541,146 @@ jobs:
 
 
 
-      - name: Watch low-latency peer + keep alive
+      - name: Watch latency + auto-reconnect on degradation
         shell: pwsh
         run: |
           $ErrorActionPreference = 'SilentlyContinue'
           $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          $authkey = "${{ inputs.ts_authkey }}"
+          $hostname = $env:TS_HOSTNAME
           $mins = [int]"${{ env.RUNTIME_MINUTES }}"
           $end = (Get-Date).AddMinutes($mins)
-          $LATENCY_THRESHOLD_MS = 50   # tune one line: direct or relayed <= this = "low latency"
 
-          # NAT keepalive — keeps the tailnet tunnel warm so P2P direct can establish
-          # runs the whole watch loop, even before any peer is seen
+          # ===== TUNABLE THRESHOLDS — one line each =====
+          $LATENCY_GOOD_MS       = 50    # peer considered low-latency at/below this
+          $LATENCY_BAD_MS        = 120   # peer considered "heavy" at/above this
+          $BAD_STRIKES           = 3     # consecutive bad pings before reconnect
+          $PROBE_EVERY_SEC       = 15    # ping interval
+          $RECONNECT_COOLDOWN_SEC = 120  # min seconds between two reconnects
+          $MAX_RECONNECTS        = 30    # safety cap per session
+          $RECONNECT_SETTLE_SEC  = 8     # wait after up before resuming probes
+          # =============================================
+
+          $reconnects   = 0
+          $badStreak    = 0
+          $infoShown    = $false
+          $lastReconnect = [datetime]::MinValue
+          $peerIP       = $null
+          $peerHostName = ""
+
+          function Get-ActivePeer {
+            param($ts)
+            try {
+              $raw = & $ts status --json 2>$null | Out-String
+              if (-not $raw) { return $null }
+              $j = $raw | ConvertFrom-Json
+              if (-not $j.Peer) { return $null }
+              $peers = @($j.Peer.PSObject.Properties.Value)
+              foreach ($p in $peers) {
+                if (-not $p.Active) { continue }
+                if (($p.TxBytes + $p.RxBytes) -eq 0) { continue }
+                $ip = ($p.TailscaleIPs | Select-Object -First 1)
+                if (-not $ip) { continue }
+                return @{ IP = $ip; Peer = $p }
+              }
+            } catch {}
+            return $null
+          }
+
+          function Ping-Peer {
+            param($ts,$ip)
+            try {
+              $out = & $ts ping --until-direct=false --timeout=3s $ip 2>&1 | Out-String
+              $m = [regex]::Match($out, 'in\s+([0-9]+)\s*ms')
+              if ($m.Success) { return [int]$m.Groups[1].Value }
+            } catch {}
+            return -1
+          }
+
+          function Get-PathKind {
+            param($p)
+            if (-not [string]::IsNullOrWhiteSpace($p.CurAddr)) { return "DIRECT" }
+            return "relay $($p.Relay)"
+          }
+
+          function Show-SessionInfo {
+            param($peerIP,$latency,$pathKind)
+            $cpu = Get-CimInstance Win32_Processor
+            $ram = Get-CimInstance Win32_ComputerSystem
+            $totalRAM = [math]::Round($ram.TotalPhysicalMemory / 1GB, 2)
+            $pubIp = ""
+            try { $pubIp = (Invoke-WebRequest -Uri "https://api.ipify.org" -UseBasicParsing -TimeoutSec 5).Content.Trim() } catch {}
+            $geo = ""
+            try {
+              $g = Invoke-RestMethod -Uri "https://ipinfo.io/$pubIp/json" -TimeoutSec 5
+              $geo = "$($g.city), $($g.region), $($g.country) [$($g.org)]"
+            } catch { $geo = "(geo lookup failed)" }
+
+            Write-Host ""
+            Write-Host "================================================================"
+            Write-Host "                       ARDP SESSION INFO"
+            Write-Host "  (unlocked: low-latency peer ${latency}ms via $pathKind)"
+            Write-Host "================================================================"
+            Write-Host "  Peer               : $peerHostName ($peerIP)"
+            Write-Host "  ----------------------------------------------------------------"
+            Write-Host "  Runner public IP   : $pubIp"
+            Write-Host "  Runner geo         : $geo"
+            Write-Host "  Processor          : $($cpu.Name)"
+            Write-Host "  Cores (logical)    : $($cpu.NumberOfLogicalProcessors)"
+            Write-Host "  RAM (GB)           : $totalRAM"
+            Write-Host "  ----------------------------------------------------------------"
+            Write-Host "  RDP user           : $env:RDP_USER"
+            Write-Host "  RDP password       : $env:RDP_PASS"
+            Write-Host "  Connect via        : mstsc /v:$env:TAILSCALE_IP"
+            Write-Host "  Color depth        : $env:COLOR_DEPTH"
+            Write-Host "  Runtime (min)      : $env:RUNTIME_MINUTES"
+            Write-Host "  ----------------------------------------------------------------"
+            Write-Host "  Tailscale hostname : $env:TS_HOSTNAME"
+            Write-Host "  Tailscale IPv4     : $env:TAILSCALE_IP"
+            Write-Host "  Nearest DERP       : $env:DERP_NEAREST"
+            Write-Host "  Top-3 DERP latency : $env:DERP_LATENCY"
+            Write-Host "  ----------------------------------------------------------------"
+            Write-Host "  Auto-reconnect     : ENABLED"
+            Write-Host "  Bad threshold      : ${LATENCY_BAD_MS}ms for ${BAD_STRIKES} strikes"
+            Write-Host "  Cooldown           : ${RECONNECT_COOLDOWN_SEC}s between reconnects"
+            Write-Host "  Max reconnects     : $MAX_RECONNECTS"
+            Write-Host "================================================================"
+            & $ts status
+            Write-Host ""
+          }
+
+          function Invoke-Reconnect {
+            param()
+            $t = [datetime]::Now.ToString('HH:mm:ss')
+            Write-Host "[$t] RECONNECT #$($reconnects): tearing Tailscale down..."
+            & $ts down 2>&1 | Out-Null
+            Start-Sleep -Seconds 3
+            Write-Host "[$t] RECONNECT #$($reconnects): bringing Tailscale back up (reset, re-eval DERP)..."
+            # Node is already authenticated. --reset re-runs netcheck so a
+            # better DERP / direct path can be picked. Re-passing --authkey
+            # would consume the key again on ephemeral keys, so we omit it.
+            & $ts up --hostname $hostname --accept-dns=true --accept-routes=true --reset 2>&1 | Out-Null
+            Start-Sleep -Seconds $RECONNECT_SETTLE_SEC
+            # Warm up P2P path
+            1..3 | ForEach-Object {
+              try { & $ts ping --until-direct=false --timeout=3s "100.64.0.1" 2>$null | Out-Null } catch {}
+              Start-Sleep -Seconds 2
+            }
+            $newIp = & $ts ip -4 2>$null | Select-Object -First 1
+            if ($newIp) {
+              "TAILSCALE_IP=$newIp" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+              Write-Host "[$t] RECONNECT #$($reconnects): new Tailscale IPv4 = $newIp"
+            } else {
+              Write-Host "[$t] RECONNECT #$($reconnects): WARNING - no IPv4 after up"
+            }
+            $nc = & $ts netcheck 2>&1 | Out-String
+            $m = [regex]::Match($nc, 'Nearest DERP:\s\*([^\s\(]+)')
+            if ($m.Success) {
+              Write-Host "[$t] RECONNECT #$($reconnects): post-reconnect nearest DERP = $($m.Groups[1].Value)"
+            }
+          }
+
+          # --- NAT keepalive job (runs the whole watch) ---
           $keepaliveJob = Start-Job -ScriptBlock {
             param($ts)
             while ($true) {
@@ -560,79 +689,63 @@ jobs:
             }
           } -ArgumentList $ts
 
-          $infoShown = $false
           try {
             while ((Get-Date) -lt $end) {
-              if (-not $infoShown) {
-                try {
-                  $raw = & $ts status --json 2>$null | Out-String
-                  if ($raw) {
-                    $j = $raw | ConvertFrom-Json
-                    $peers = @()
-                    if ($j.Peer) { $peers = @($j.Peer.PSObject.Properties.Value) }
-                    foreach ($p in $peers) {
-                      if (-not $p.Active) { continue }
-                      if (($p.TxBytes + $p.RxBytes) -eq 0) { continue }
-                      $peerIP = ($p.TailscaleIPs | Select-Object -First 1)
-                      if (-not $peerIP) { continue }
-
-                      $pingOut = & $ts ping --until-direct=false --timeout=3s $peerIP 2>&1 | Out-String
-                      $m = [regex]::Match($pingOut, 'in\s+([0-9]+)\s*ms')
-                      if (-not $m.Success) { continue }
-                      $latency = [int]$m.Groups[1].Value
-                      if ($latency -gt $LATENCY_THRESHOLD_MS) { continue }
-
-                      # low-latency peer confirmed — unlock ARDP info
-                      $cpu = Get-CimInstance Win32_Processor
-                      $ram = Get-CimInstance Win32_ComputerSystem
-                      $totalRAM = [math]::Round($ram.TotalPhysicalMemory / 1GB, 2)
-                      $pubIp = (Invoke-WebRequest -Uri "https://api.ipify.org" -UseBasicParsing -TimeoutSec 5).Content.Trim()
-                      $geo = ""
-                      try {
-                        $g = Invoke-RestMethod -Uri "https://ipinfo.io/$pubIp/json" -TimeoutSec 5
-                        $geo = "$($g.city), $($g.region), $($g.country) [$($g.org)]"
-                      } catch { $geo = "(geo lookup failed)" }
-
-                      $pathKind = if (-not [string]::IsNullOrWhiteSpace($p.CurAddr)) { "DIRECT" } else { "relay $($p.Relay)" }
-
-                      Write-Host ""
-                      Write-Host "================================================================"
-                      Write-Host "                       ARDP SESSION INFO"
-                      Write-Host "  (unlocked: low-latency peer ${latency}ms via $pathKind)"
-                      Write-Host "================================================================"
-                      Write-Host "  Peer               : $($p.HostName) ($peerIP)"
-                      Write-Host "  ----------------------------------------------------------------"
-                      Write-Host "  Runner public IP   : $pubIp"
-                      Write-Host "  Runner geo         : $geo"
-                      Write-Host "  Processor          : $($cpu.Name)"
-                      Write-Host "  Cores (logical)    : $($cpu.NumberOfLogicalProcessors)"
-                      Write-Host "  RAM (GB)           : $totalRAM"
-                      Write-Host "  ----------------------------------------------------------------"
-                      Write-Host "  RDP user           : $env:RDP_USER"
-                      Write-Host "  RDP password       : $env:RDP_PASS"
-                      Write-Host "  Connect via        : mstsc /v:$env:TAILSCALE_IP"
-                      Write-Host "  Color depth        : $env:COLOR_DEPTH (1=8bit 3=16bit 4=24bit)"
-                      Write-Host "  Runtime (min)      : $env:RUNTIME_MINUTES"
-                      Write-Host "  ----------------------------------------------------------------"
-                      Write-Host "  Tailscale hostname : $env:TS_HOSTNAME"
-                      Write-Host "  Tailscale IPv4     : $env:TAILSCALE_IP"
-                      Write-Host "  Nearest DERP       : $env:DERP_NEAREST"
-                      Write-Host "  Top-3 DERP latency : $env:DERP_LATENCY"
-                      Write-Host "  ----------------------------------------------------------------"
-                      Write-Host "  tailscale status (full):"
-                      & $ts status
-                      Write-Host ""
-                      Write-Host "================================================================"
-
-                      $infoShown = $true
-                      break
-                    }
-                  }
-                } catch {}
+              $peer = Get-ActivePeer -ts $ts
+              if (-not $peer) {
+                Write-Host "[$([datetime]::Now.ToString('HH:mm:ss'))] no active peer yet, waiting..."
+                Start-Sleep -Seconds $PROBE_EVERY_SEC
+                continue
               }
-              Start-Sleep -Seconds 15
+
+              $peerIP      = $peer.IP
+              $p           = $peer.Peer
+              $pathKind    = Get-PathKind -p $p
+              $peerHostName = $p.HostName
+
+              $latency = Ping-Peer -ts $ts -ip $peerIP
+              $stamp = [datetime]::Now.ToString('HH:mm:ss')
+
+              if ($latency -lt 0) {
+                $badStreak++
+                Write-Host "[$stamp] ping-fail via $pathKind ($peerIP) strike $badStreak/$BAD_STRIKES"
+              }
+              elseif ($latency -le $LATENCY_GOOD_MS) {
+                if (-not $infoShown) {
+                  Show-SessionInfo -peerIP $peerIP -latency $latency -pathKind $pathKind
+                  $infoShown = $true
+                } else {
+                  Write-Host "[$stamp] OK ${latency}ms via $pathKind ($peerIP)"
+                }
+                $badStreak = 0
+              }
+              elseif ($latency -ge $LATENCY_BAD_MS) {
+                $badStreak++
+                Write-Host "[$stamp] HEAVY ${latency}ms via $pathKind ($peerIP) strike $badStreak/$BAD_STRIKES"
+                $cooldownOk = ((Get-Date) - $lastReconnect).TotalSeconds -ge $RECONNECT_COOLDOWN_SEC
+                if ($badStreak -ge $BAD_STRIKES -and $cooldownOk -and $reconnects -lt $MAX_RECONNECTS) {
+                  $reconnects++
+                  $lastReconnect = Get-Date
+                  Invoke-Reconnect
+                  $badStreak = 0
+                }
+                elseif ($badStreak -ge $BAD_STRIKES -and -not $cooldownOk) {
+                  Write-Host "[$stamp] cooldown active - waiting ${RECONNECT_COOLDOWN_SEC}s before next reconnect"
+                }
+                elseif ($reconnects -ge $MAX_RECONNECTS) {
+                  Write-Host "[$stamp] reconnect cap reached ($MAX_RECONNECTS) - monitoring only"
+                }
+              }
+              else {
+                Write-Host "[$stamp] meh ${latency}ms via $pathKind ($peerIP) - within tolerance"
+                $badStreak = 0
+              }
+
+              Start-Sleep -Seconds $PROBE_EVERY_SEC
             }
-          } finally {
+            Write-Host "[$([datetime]::Now.ToString('HH:mm:ss'))] runtime elapsed - watch exit. reconnects=$reconnects"
+          }
+          finally {
             $keepaliveJob | Stop-Job -ErrorAction SilentlyContinue
             $keepaliveJob | Remove-Job -Force -ErrorAction SilentlyContinue
           }
