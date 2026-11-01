@@ -547,11 +547,8 @@ jobs:
           $ErrorActionPreference = 'SilentlyContinue'
 
           # ===== TUNABLES =====
-          # Server-side session resolution. Lower = less data per frame.
-          # 1024x768 keeps the runner session small AND fits cleanly
-          # inside any client monitor when mstsc opens fullscreen.
-          $DESK_W = 1024   # display width  (lower = less data per frame)
-          $DESK_H = 768    # display height
+          $DESK_W = 1280   # display width  (lower = less data per frame)
+          $DESK_H = 720    # display height
           $BPP    = 8      # bits per pixel (8 / 16 / 24 / 32)
           # ====================
 
@@ -614,7 +611,6 @@ jobs:
             "prompt for credentials:i:0",
             "negotiate security layer:i:1",
             "authentication level:i:0",
-            "screen mode id:i:2",
             "desktopwidth:i:$DESK_W",
             "desktopheight:i:$DESK_H",
             "session bpp:i:$BPP",
