@@ -541,7 +541,7 @@ jobs:
 
 
 
-      - name: Watch latency + auto-reconnect on degradation
+      - name: Watch latency + optimize on degradation (no disconnect)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'SilentlyContinue'
@@ -552,19 +552,19 @@ jobs:
           $end = (Get-Date).AddMinutes($mins)
 
           # ===== TUNABLE THRESHOLDS — one line each =====
-          $LATENCY_GOOD_MS       = 50    # peer considered low-latency at/below this
-          $LATENCY_BAD_MS        = 120   # peer considered "heavy" at/above this
-          $BAD_STRIKES           = 3     # consecutive bad pings before reconnect
-          $PROBE_EVERY_SEC       = 15    # ping interval
-          $RECONNECT_COOLDOWN_SEC = 120  # min seconds between two reconnects
-          $MAX_RECONNECTS        = 30    # safety cap per session
-          $RECONNECT_SETTLE_SEC  = 8     # wait after up before resuming probes
+          $LATENCY_GOOD_MS       = 80    # peer considered low-latency at/below this
+          $LATENCY_BAD_MS        = 180   # above this = "heavy" - start nudging
+          $LATENCY_CRITICAL_MS   = 300   # above this = "very heavy" - nudge harder
+          $BAD_STRIKES           = 4     # consecutive heavy pings before optimize
+          $PROBE_EVERY_SEC       = 20    # ping interval (less chatty)
+          $OPTIMIZE_COOLDOWN_SEC = 90    # min seconds between two optimize calls
+          $MAX_OPTIMIZES         = 60    # safety cap per session
           # =============================================
 
-          $reconnects   = 0
+          $optCount     = 0
           $badStreak    = 0
           $infoShown    = $false
-          $lastReconnect = [datetime]::MinValue
+          $lastOptimize = [datetime]::MinValue
           $peerIP       = $null
           $peerHostName = ""
 
@@ -640,43 +640,53 @@ jobs:
             Write-Host "  Nearest DERP       : $env:DERP_NEAREST"
             Write-Host "  Top-3 DERP latency : $env:DERP_LATENCY"
             Write-Host "  ----------------------------------------------------------------"
-            Write-Host "  Auto-reconnect     : ENABLED"
-            Write-Host "  Bad threshold      : ${LATENCY_BAD_MS}ms for ${BAD_STRIKES} strikes"
-            Write-Host "  Cooldown           : ${RECONNECT_COOLDOWN_SEC}s between reconnects"
-            Write-Host "  Max reconnects     : $MAX_RECONNECTS"
+            Write-Host "  Auto-optimize      : ENABLED (no disconnect)"
+            Write-Host "  Heavy threshold    : ${LATENCY_BAD_MS}ms for ${BAD_STRIKES} strikes"
+            Write-Host "  Critical threshold : ${LATENCY_CRITICAL_MS}ms"
+            Write-Host "  Cooldown           : ${OPTIMIZE_COOLDOWN_SEC}s between nudges"
+            Write-Host "  Max optimizes      : $MAX_OPTIMIZES"
             Write-Host "================================================================"
             & $ts status
             Write-Host ""
           }
 
-          function Invoke-Reconnect {
+          function Invoke-Optimize {
             param()
             $t = [datetime]::Now.ToString('HH:mm:ss')
-            Write-Host "[$t] RECONNECT #$($reconnects): tearing Tailscale down..."
-            & $ts down 2>&1 | Out-Null
-            Start-Sleep -Seconds 3
-            Write-Host "[$t] RECONNECT #$($reconnects): bringing Tailscale back up (reset, re-eval DERP)..."
-            # Node is already authenticated. --reset re-runs netcheck so a
-            # better DERP / direct path can be picked. Re-passing --authkey
-            # would consume the key again on ephemeral keys, so we omit it.
-            & $ts up --hostname $hostname --accept-dns=true --accept-routes=true --reset 2>&1 | Out-Null
-            Start-Sleep -Seconds $RECONNECT_SETTLE_SEC
-            # Warm up P2P path
-            1..3 | ForEach-Object {
-              try { & $ts ping --until-direct=false --timeout=3s "100.64.0.1" 2>$null | Out-Null } catch {}
-              Start-Sleep -Seconds 2
+            Write-Host "[$t] OPTIMIZE #$($optCount): path is heavy, nudging WITHOUT disconnect..."
+            # 1. Force re-discovery of the direct path. This sends probe
+            #    packets to find a better NAT-traversal path. Does NOT
+            #    drop the tunnel. Existing RDP session stays alive.
+            try {
+              $probeOut = & $ts ping --until-direct=true --timeout=15s $peerIP 2>&1 | Out-String
+              if ($probeOut.Trim()) {
+                Write-Host "    ping-probe result:"
+                Write-Host $probeOut
+              }
+            } catch {}
+
+            # 2. Burst warm-up: send a handful of small packets to keep
+            #    NAT mapping fresh and prime the path.
+            foreach ($i in 1..5) {
+              try { & $ts ping --until-direct=false --timeout=2s $peerIP 2>$null | Out-Null } catch {}
             }
-            $newIp = & $ts ip -4 2>$null | Select-Object -First 1
-            if ($newIp) {
-              "TAILSCALE_IP=$newIp" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-              Write-Host "[$t] RECONNECT #$($reconnects): new Tailscale IPv4 = $newIp"
+
+            # 3. Live TCP tweaks (affect new sockets; existing RDP stays).
+            try { netsh int tcp set global autotuninglevel=experimental } catch {}
+            try { netsh int tcp set global rss=enabled } catch {}
+            try { netsh int tcp set global rsc=enabled } catch {}
+            try { netsh int tcp set global ecncapability=enabled } catch {}
+
+            # 4. Flush DNS resolver cache (cheap, harmless).
+            try { ipconfig /flushdns | Out-Null } catch {}
+
+            # 5. Re-check latency right after the nudge.
+            Start-Sleep -Seconds 2
+            $after = Ping-Peer -ts $ts -ip $peerIP
+            if ($after -ge 0) {
+              Write-Host "[$t] OPTIMIZE #$($optCount): latency after nudge = ${after}ms (was ${latency}ms)"
             } else {
-              Write-Host "[$t] RECONNECT #$($reconnects): WARNING - no IPv4 after up"
-            }
-            $nc = & $ts netcheck 2>&1 | Out-String
-            $m = [regex]::Match($nc, 'Nearest DERP:\s\*([^\s\(]+)')
-            if ($m.Success) {
-              Write-Host "[$t] RECONNECT #$($reconnects): post-reconnect nearest DERP = $($m.Groups[1].Value)"
+              Write-Host "[$t] OPTIMIZE #$($optCount): post-nudge ping failed (path may still be settling)"
             }
           }
 
@@ -721,19 +731,23 @@ jobs:
               }
               elseif ($latency -ge $LATENCY_BAD_MS) {
                 $badStreak++
-                Write-Host "[$stamp] HEAVY ${latency}ms via $pathKind ($peerIP) strike $badStreak/$BAD_STRIKES"
-                $cooldownOk = ((Get-Date) - $lastReconnect).TotalSeconds -ge $RECONNECT_COOLDOWN_SEC
-                if ($badStreak -ge $BAD_STRIKES -and $cooldownOk -and $reconnects -lt $MAX_RECONNECTS) {
-                  $reconnects++
-                  $lastReconnect = Get-Date
-                  Invoke-Reconnect
+                $cooldownOk = ((Get-Date) - $lastOptimize).TotalSeconds -ge $OPTIMIZE_COOLDOWN_SEC
+                $canOptimize = ($badStreak -ge $BAD_STRIKES) -and $cooldownOk -and ($optCount -lt $MAX_OPTIMIZES)
+                if ($canOptimize) {
+                  Write-Host "[$stamp] HEAVY ${latency}ms via $pathKind ($peerIP) strike $badStreak/$BAD_STRIKES -> OPTIMIZE (no disconnect)"
+                  $optCount++
+                  $lastOptimize = Get-Date
+                  Invoke-Optimize
                   $badStreak = 0
                 }
-                elseif ($badStreak -ge $BAD_STRIKES -and -not $cooldownOk) {
-                  Write-Host "[$stamp] cooldown active - waiting ${RECONNECT_COOLDOWN_SEC}s before next reconnect"
+                elseif (-not $cooldownOk) {
+                  Write-Host "[$stamp] HEAVY ${latency}ms via $pathKind - cooldown (${OPTIMIZE_COOLDOWN_SEC}s)"
                 }
-                elseif ($reconnects -ge $MAX_RECONNECTS) {
-                  Write-Host "[$stamp] reconnect cap reached ($MAX_RECONNECTS) - monitoring only"
+                elseif ($optCount -ge $MAX_OPTIMIZES) {
+                  Write-Host "[$stamp] HEAVY ${latency}ms via $pathKind - optimize cap reached ($MAX_OPTIMIZES) - monitoring only"
+                }
+                else {
+                  Write-Host "[$stamp] HEAVY ${latency}ms via $pathKind ($peerIP) strike $badStreak/$BAD_STRIKES"
                 }
               }
               else {
@@ -743,9 +757,10 @@ jobs:
 
               Start-Sleep -Seconds $PROBE_EVERY_SEC
             }
-            Write-Host "[$([datetime]::Now.ToString('HH:mm:ss'))] runtime elapsed - watch exit. reconnects=$reconnects"
+            Write-Host "[$([datetime]::Now.ToString('HH:mm:ss'))] runtime elapsed - watch exit. optimizes=$optCount"
           }
           finally {
             $keepaliveJob | Stop-Job -ErrorAction SilentlyContinue
             $keepaliveJob | Remove-Job -Force -ErrorAction SilentlyContinue
           }
+
