@@ -541,7 +541,131 @@ jobs:
 
 
 
-      - name: Watch latency + optimize on degradation (no disconnect)
+      - name: Tune display + generate tuned RDP file
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'SilentlyContinue'
+
+          # ===== TUNABLES =====
+          $DESK_W = 1280   # display width  (lower = less data per frame)
+          $DESK_H = 720    # display height
+          $BPP    = 8      # bits per pixel (8 / 16 / 24 / 32)
+          # ====================
+
+          # --- 1. Lower the runner's own display resolution ---
+          # The Windows runner usually defaults to 1920x1080 or higher.
+          # Fewer pixels on the server side = fewer pixels RDP has to
+          # encode and transmit. This is the single biggest lever for
+          # perceived RDP heaviness, more than any network tweak.
+          # Use the legacy QRes-style approach via Set-DisplayResolution
+          # (works on Server/Core) and fall back to display-switch flags.
+          try {
+            # Set-DisplayResolution works on Windows Server Core (GitHub runner)
+            $curW = (Get-CimInstance -ClassName Win32_VideoController).CurrentHorizontalResolution
+            $curH = (Get-CimInstance -ClassName Win32_VideoController).CurrentVerticalResolution
+            Write-Host "Current display: ${curW}x${curH}"
+            if ((Get-Command Set-DisplayResolution -ErrorAction SilentlyContinue)) {
+              Set-DisplayResolution -Width $DESK_W -Height $DESK_H -Force -ErrorAction SilentlyContinue
+            }
+            # Also try the registry path that RDP picks up at next logon
+            $reg = "HKCU:\Control Panel\Desktop"
+            Set-ItemProperty $reg -Name "Wallpaper" -Value "" -Type String -ErrorAction SilentlyContinue
+          } catch {
+            Write-Host "Display resolution change skipped: $($_.Exception.Message)"
+          }
+          Write-Host "[OK] Display tune attempt done"
+
+          # --- 2. Enforce UDP transport for RDP ---
+          # UDP gives lower latency than TCP for interactive RDP. The
+          # earlier 'RDP Low-Lag Tune' step set SelectTransport=2 (both),
+          # here we explicitly prefer UDP and bump the keepalive.
+          $tsPol = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
+          New-Item -Path $tsPol -Force | Out-Null
+          Set-ItemProperty $tsPol -Name "SelectTransport"        -Type DWord -Value 1  # 1 = prefer UDP
+          Set-ItemProperty $tsPol -Name "SelectNetworkDetect"     -Type DWord -Value 1
+          Set-ItemProperty $tsPol -Name "fUseUdpPortRedirector"   -Type DWord -Value 1
+
+          # Make sure the UDP listener is allowed through the firewall
+          try {
+            Enable-NetFirewallRule -DisplayGroup "Remote Desktop" | Out-Null
+            Get-NetFirewallRule -DisplayGroup "Remote Desktop" | ForEach-Object {
+              $rule = $_
+              Get-NetFirewallPortFilter -AssociatedNetFirewallRule $rule | Where-Object {
+                $_.Protocol -eq 'UDP'
+              } | ForEach-Object {
+                try { Enable-NetFirewallRule -Name $rule.Name -ErrorAction SilentlyContinue } catch {}
+              }
+            }
+          } catch {}
+          Write-Host "[OK] RDP UDP transport preferred"
+
+          # --- 3. Generate the tuned .rdp client file ---
+          # The operator downloads this file and opens it with mstsc.
+          # It encodes every latency-sensitive setting on the client
+          # side: low bpp, no bitmap cache, max compression, no
+          # printers/smartcards/audio capture, autoreconnect on.
+          $rdpPath = "$env:RUNNER_TEMP\bullet.rdp"
+          $lines = @(
+            "full address:s:$env:TAILSCALE_IP" + ":3389",
+            "username:s:$env:RDP_USER",
+            "prompt for credentials:i:0",
+            "negotiate security layer:i:1",
+            "authentication level:i:0",
+            "desktopwidth:i:$DESK_W",
+            "desktopheight:i:$DESK_H",
+            "session bpp:i:$BPP",
+            "compression:i:1",
+            "keyboardhook:i:2",
+            "audiocapturemode:i:0",
+            "audiomode:i:0",
+            "redirectclipboard:i:1",
+            "redirectcomports:i:0",
+            "redirectdrives:i:0",
+            "redirectprinters:i:0",
+            "redirectsmartcards:i:0",
+            "redirectposdevices:i:0",
+            "redirectlocation:i:0",
+            "redirectwebauthn:i:0",
+            "displayconnectionid:i:1",
+            "use multimon:i:0",
+            "bitmapcachepersistenable:i:0",
+            "disable themes:i:1",
+            "disable wallpaper:i:1",
+            "disable full window drag:i:1",
+            "disable menu anims:i:1",
+            "disable cursor setting:i:1",
+            "allow font smoothing:i:0",
+            "allow desktop composition:i:0",
+            "videoplaybackmode:i:1",
+            "bandwidthautodetect:i:1",
+            "networkautodetect:i:7",
+            "connection type:i:7",
+            "autoreconnection enabled:i:1",
+            "prompt for credentials on client:i:0",
+            "enablecredsspsupport:i:1",
+            "use redirection server name:i:0"
+          )
+          $lines -join "`r`n" | Set-Content -Path $rdpPath -Encoding ASCII -NoNewline
+          Add-Content -Path $rdpPath -Value "`r`n" -Encoding ASCII -NoNewline
+          Write-Host "[OK] RDP file written to: $rdpPath"
+          Write-Host "--- contents ---"
+          Get-Content $rdpPath | ForEach-Object { Write-Host "  $_" }
+          Write-Host "--- end ---"
+
+          "RDP_FILE_PATH=$rdpPath" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "DESK_W=$DESK_W" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "DESK_H=$DESK_H" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "RDP_BPP=$BPP" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Upload tuned RDP file
+        uses: actions/upload-artifact@v4
+        with:
+          name: bullet-rdp-tuned
+          path: ${{ env.RDP_FILE_PATH }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Watch latency + auto-reconnect on degradation
         shell: pwsh
         run: |
           $ErrorActionPreference = 'SilentlyContinue'
