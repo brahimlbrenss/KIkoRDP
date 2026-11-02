@@ -547,32 +547,27 @@ jobs:
           $ErrorActionPreference = 'SilentlyContinue'
 
           # ===== TUNABLES =====
-          $DESK_W = 1280   # display width  (lower = less data per frame)
-          $DESK_H = 720    # display height
-          $BPP    = 8      # bits per pixel (8 / 16 / 24 / 32)
+          $DESK_W = 1024
+          $DESK_H = 768
+          $BPP    = 8
           # ====================
 
           # --- 1. Lower the runner's own display resolution ---
-          # The Windows runner usually defaults to 1920x1080 or higher.
-          # Fewer pixels on the server side = fewer pixels RDP has to
-          # encode and transmit. This is the single biggest lever for
-          # perceived RDP heaviness, more than any network tweak.
-          # Use the legacy QRes-style approach via Set-DisplayResolution
-          # (works on Server/Core) and fall back to display-switch flags.
           try {
-            # Set-DisplayResolution works on Windows Server Core (GitHub runner)
             $curW = (Get-CimInstance -ClassName Win32_VideoController).CurrentHorizontalResolution
             $curH = (Get-CimInstance -ClassName Win32_VideoController).CurrentVerticalResolution
             Write-Host "Current display: ${curW}x${curH}"
+
             if ((Get-Command Set-DisplayResolution -ErrorAction SilentlyContinue)) {
               Set-DisplayResolution -Width $DESK_W -Height $DESK_H -Force -ErrorAction SilentlyContinue
             }
-            # Also try the registry path that RDP picks up at next logon
+
             $reg = "HKCU:\Control Panel\Desktop"
             Set-ItemProperty $reg -Name "Wallpaper" -Value "" -Type String -ErrorAction SilentlyContinue
           } catch {
             Write-Host "Display resolution change skipped: $($_.Exception.Message)"
           }
+
           Write-Host "[OK] Display tune attempt done"
 
           # --- 2. Enforce UDP transport for RDP ---
@@ -613,6 +608,8 @@ jobs:
             "authentication level:i:0",
             "desktopwidth:i:$DESK_W",
             "desktopheight:i:$DESK_H",
+             "smart sizing:i:1",
+             "dynamic resolution:i:0",
             "session bpp:i:$BPP",
             "compression:i:1",
             "keyboardhook:i:2",
