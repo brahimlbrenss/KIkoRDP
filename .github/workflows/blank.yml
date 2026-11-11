@@ -672,13 +672,7 @@ jobs:
           "DESK_H=$DESK_H" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "RDP_BPP=$BPP" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Upload tuned RDP file
-        uses: actions/upload-artifact@v4
-        with:
-          name: bullet-rdp-tuned
-          path: ${{ env.RDP_FILE_PATH }}
-          if-no-files-found: error
-          retention-days: 7
+
 
       - name: Watch latency + auto-reconnect on degradation
         shell: pwsh
