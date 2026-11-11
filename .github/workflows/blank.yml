@@ -376,22 +376,38 @@ jobs:
             $derpName = $m.Groups[1].Value.Trim()
             $derpCode = $m.Groups[2].Value.Trim()
           }
-          $latencies = @()
-          foreach ($line in ($nc -split "`n")) {
-            $lm = [regex]::Match($line, '^\s*-\s*(.+?):\s*([0-9]+\.?[0-9]*)\s*ms')
-            if ($lm.Success) {
-              $lat = [double]$lm.Groups[2].Value
-              $latencies += [pscustomobject]@{
-                Region = $lm.Groups[1].Value.Trim()
-                LatencyMs = $lat
-              }
-              if ($lat -lt $nearestMs) { $nearestMs = $lat }
-            }
-          }
-          $top3 = $latencies | Sort-Object LatencyMs | Select-Object -First 3
-          if ($top3) {
-            $derpLatency = ($top3 | ForEach-Object { "$($_.Region)=$($_.LatencyMs)ms" }) -join " | "
-          }
+
+$latencies = @()
+
+foreach ($line in ($nc -split "`n")) {
+  $lm = [regex]::Match($line, '^\s*-\s*(.+?):\s*([0-9]+(?:\.[0-9]+)?)\s*ms')
+
+  if ($lm.Success) {
+    $lat = [double]$lm.Groups[2].Value
+
+    $latencies += [pscustomobject]@{
+      Region = $lm.Groups[1].Value.Trim()
+      LatencyMs = $lat
+    }
+
+    if ($lat -lt $nearestMs) {
+      $nearestMs = $lat
+    }
+  }
+}
+
+$top3 = @($latencies | Sort-Object LatencyMs | Select-Object -First 3)
+
+if ($top3.Count -gt 0) {
+  $derpParts = @()
+
+  foreach ($item in $top3) {
+    $derpParts += ($item.Region + "=" + $item.LatencyMs + "ms")
+  }
+
+  $derpLatency = [string]::Join(" | ", $derpParts)
+}
+
 
           "DERP_NAME=$derpName" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "DERP_CODE=$derpCode" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
