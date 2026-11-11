@@ -353,7 +353,7 @@ jobs:
             $url = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
             $dst = "$env:TEMP\tailscale.msi"
             Invoke-WebRequest -Uri $url -OutFile $dst
-            Start-Process msiexec.exe -ArgumentList "/i",`"$dst`"","/quiet","/norestart" -Wait
+            Start-Process msiexec.exe -ArgumentList "/i", "`"$dst`"", "/quiet", "/norestart" -Wait
             Remove-Item $dst -Force
           }
           & $ts logout | Out-Null
@@ -394,8 +394,7 @@ jobs:
             foreach ($t in $top3) {
               $joinArr += "$($t.Region)=$($t.LatencyMs)ms"
             }
-            $delimiter = " | "
-            $derpLatency = [string]::Join($delimiter, $joinArr)
+            $derpLatency = [string]::Join(" | ", $joinArr)
           }
 
           "DERP_NAME=$derpName" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
