@@ -144,7 +144,7 @@ jobs:
             if (-not $ok) {
               $msi = "$env:TEMP\chromeremotedesktophost.msi"
               Invoke-WebRequest -Uri "https://dl.google.com/edgedl/chrome-remote-desktop/chromeremotedesktophost.msi" -OutFile $msi -ErrorAction Stop
-              Start-Process msiexec.exe -ArgumentList "/i",`"$msi`"","/quiet","/norestart" -Wait
+              Start-Process msiexec.exe -ArgumentList "/i", "`"$msi`"", "/quiet", "/norestart" -Wait
               Remove-Item $msi -Force
             }
           }
