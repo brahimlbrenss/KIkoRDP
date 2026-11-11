@@ -1,4 +1,4 @@
-name: RDP 16RAM
+name: RDP 16RAM FAST
 
 on:
   workflow_dispatch:
@@ -52,9 +52,13 @@ on:
         required: false
         default: "1"
       use_self_hosted_fr:
-        description: "Use self-hosted FR runner (set up separately on OVH/Scaleway VPS)"
+        description: "Use self-hosted FR runner (set up separately on OVH/Scaleway VPS) — RECOMMENDED for always-fast"
         type: boolean
         default: false
+      max_derp_ms:
+        description: "Abort if nearest DERP latency > this (ms). 0 = disable gate"
+        required: false
+        default: "90"
 
 permissions:
   contents: read
@@ -107,6 +111,7 @@ jobs:
       RUNTIME_INPUT: ${{ inputs.runtime_minutes }}
       TS_EXIT_NODE_INPUT: ${{ inputs.ts_exit_node }}
       COLOR_DEPTH_INPUT: ${{ inputs.color_depth }}
+      MAX_DERP_MS_INPUT: ${{ inputs.max_derp_ms }}
 
     steps:
       - name: Set CRD flag
@@ -139,7 +144,7 @@ jobs:
             if (-not $ok) {
               $msi = "$env:TEMP\chromeremotedesktophost.msi"
               Invoke-WebRequest -Uri "https://dl.google.com/edgedl/chrome-remote-desktop/chromeremotedesktophost.msi" -OutFile $msi -ErrorAction Stop
-              Start-Process msiexec.exe -ArgumentList "/i","`"$msi`"","/quiet","/norestart" -Wait
+              Start-Process msiexec.exe -ArgumentList "/i",`"$msi`"","/quiet","/norestart" -Wait
               Remove-Item $msi -Force
             }
           }
@@ -157,7 +162,7 @@ jobs:
           $starter = "${Env:PROGRAMFILES(X86)}\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe"
           $redir = "https://remotedesktop.google.com/_/oauthredirect"
           $name  = $Env:COMPUTERNAME
-          $args  = @("--code=`"$raw`"","--redirect-url=`"$redir`"","--name=`"$name`"","--pin=`"$pin`"")
+          $args  = @("--code`"$raw`"","--redirect-url`"$redir`"","--name`"$name`"","--pin`"$pin`"")
           Start-Process -FilePath $starter -ArgumentList $args
 
       - name: Decide hostname + runtime
@@ -184,29 +189,38 @@ jobs:
           if ($cd -gt 5) { $cd = 5 }
           "COLOR_DEPTH=$cd" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+          $maxDerp = IntOr($env:MAX_DERP_MS_INPUT, 90)
+          "MAX_DERP_MS=$maxDerp" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
       - name: Ensure High-Performance CPU
         shell: pwsh
         run: |
           $cpu = Get-CimInstance Win32_Processor
           $name = $cpu.Name.Trim()
           if ($name -match "Pentium|Celeron|Atom|Core i3|i5") {
-              Write-Error "Aborting run: weak CPU ($name)."
+              Write-Error "Aborting run: weak CPU ($name). Re-run until you get a stronger runner."
               exit 1
           }
+          Write-Host "[OK] CPU accepted: $name"
 
       - name: MAX Performance Tune
         shell: pwsh
         run: |
           $ErrorActionPreference = 'SilentlyContinue'
 
+          # High Performance power plan
           powercfg /setactive 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
           powercfg /change monitor-timeout-ac 0
           powercfg /change standby-timeout-ac 0
           powercfg /change hibernate-timeout-ac 0
           powercfg /change disk-timeout-ac 0
           powercfg /hibernate off
+          # Ultimate Performance if available
+          powercfg -duplicatescheme e9a42b02-d5df-448d-aa00-03f14749eb61 2>$null
+          powercfg /setactive e9a42b02-d5df-448d-aa00-03f14749eb61 2>$null
           Write-Host "[OK] Power plan"
 
+          # Kill Defender hard
           try { Set-MpPreference -DisableRealtimeMonitoring $true } catch {}
           try { Set-MpPreference -DisableBehaviorMonitoring $true } catch {}
           try { Set-MpPreference -DisableIOAVProtection $true } catch {}
@@ -225,7 +239,12 @@ jobs:
             'SensorService','PhoneSvc','CscService','DPS','DusmSvc',
             'Themes','WpnService','Spooler','PrintNotify',
             'FontCache3.0.0.0','WMPNetworkSvc','WbioSrvc','SmsRouter',
-            'wlidsvc','TrkWks','ScDeviceEnum','HidBth','BthAvctpSvc'
+            'wlidsvc','TrkWks','ScDeviceEnum','HidBth','BthAvctpSvc',
+            'OneSyncSvc','MessagingService','PimIndexMaintenanceSvc',
+            'UnistoreSvc','UserDataSvc','WpnUserService','CDPUserSvc',
+            'DevicesFlowUserSvc','BcastDVRUserService','CaptureService',
+            'ConsentUxUserSvc','CredentialEnrollmentManagerUserSvc',
+            'DevicePickerUserSvc','PrintWorkflowUserSvc'
           )
           foreach ($s in $svcs) {
             try { Stop-Service -Name $s -Force } catch {}
@@ -239,6 +258,7 @@ jobs:
           }
           Write-Host "[OK] WU off"
 
+          # Aggressive TCP stack
           netsh int tcp set global rss=enabled
           netsh int tcp set global autotuninglevel=experimental
           netsh int tcp set global timestamps=disabled
@@ -249,6 +269,12 @@ jobs:
           netsh int tcp set global rsc=enabled
           netsh int tcp set global ecncapability=enabled
           netsh int tcp set global nonsackrttresiliency=disabled
+          netsh int tcp set global chimney=enabled
+          netsh int tcp set global dca=enabled
+          netsh int tcp set global netdma=enabled
+          netsh int ipv4 set dynamicport tcp start=10000 num=55535
+          netsh int ipv6 set dynamicport tcp start=10000 num=55535
+
           Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } | ForEach-Object {
             try { Set-NetAdapterAdvancedProperty -Name $_.Name -RegistryKeyword "*TcpAckFrequency" -RegistryValue 1 } catch {}
             try { Set-NetAdapterAdvancedProperty -Name $_.Name -RegistryKeyword "*TCPNoDelay" -RegistryValue 1 } catch {}
@@ -256,10 +282,13 @@ jobs:
             try { Set-NetAdapterAdvancedProperty -Name $_.Name -RegistryKeyword "*InterruptModeration" -RegistryValue 0 } catch {}
             try { Set-NetAdapterAdvancedProperty -Name $_.Name -RegistryKeyword "*JumboPacket" -RegistryValue 1514 } catch {}
             try { Set-NetAdapterAdvancedProperty -Name $_.Name -RegistryKeyword "*RSS" -RegistryValue 1 } catch {}
-            try { Set-NetAdapterAdvancedProperty -Name $_.Name -RegistryKeyword "*NumRssQueues" -RegistryValue 4 } catch {}
+            try { Set-NetAdapterAdvancedProperty -Name $_.Name -RegistryKeyword "*NumRssQueues" -RegistryValue 8 } catch {}
+            try { Set-NetAdapterAdvancedProperty -Name $_.Name -RegistryKeyword "*ReceiveBuffers" -RegistryValue 512 } catch {}
+            try { Set-NetAdapterAdvancedProperty -Name $_.Name -RegistryKeyword "*TransmitBuffers" -RegistryValue 512 } catch {}
           }
           Write-Host "[OK] TCP"
 
+          # Kill visual effects completely
           $pers = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
           if (-not (Test-Path $pers)) { New-Item -Path $pers -Force | Out-Null }
           Set-ItemProperty -Path $pers -Name "EnableTransparency" -Value 0
@@ -277,6 +306,7 @@ jobs:
           Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "Wallpaper" -Value ""
           Write-Host "[OK] UI strip"
 
+          # RDP / GPU / MMCSS high priority
           $rdpTcp = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
           Set-ItemProperty -Path $rdpTcp -Name "fMouseClicksDisabled" -Value 0
           Set-ItemProperty -Path $rdpTcp -Name "LatencySensitive" -Value 1
@@ -285,9 +315,10 @@ jobs:
           try { Set-ItemProperty -Path $gfx -Name "TdrLevel" -Value 0 } catch {}
           $mmcss = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Multimedia\SystemProfile"
           try { Set-ItemProperty -Path $mmcss -Name "NetworkThrottleQuota" -Value 0xFFFFFFFF } catch {}
-          try { Set-ItemProperty -Path "$mmcss\Tasks" -Name "Network" -Value 8 -Type DWord } catch {}
+          try { Set-ItemProperty -Path $mmcss -Name "SystemResponsiveness" -Value 0 } catch {}
           try {
             $netTask = "$mmcss\Tasks\Network"
+            if (-not (Test-Path $netTask)) { New-Item -Path $netTask -Force | Out-Null }
             Set-ItemProperty -Path $netTask -Name "Affinity" -Type DWord -Value 0
             Set-ItemProperty -Path $netTask -Name "Background Only" -Type String -Value "False"
             Set-ItemProperty -Path $netTask -Name "Clock Rate" -Type DWord -Value 10000
@@ -306,9 +337,12 @@ jobs:
           try { Set-ItemProperty -Path $dwm -Name "AlwaysHibernateThumbnails" -Value 0 } catch {}
           Write-Host "[OK] Game Mode"
 
-          ipconfig /flushdns | Out-Null
-          Write-Host "[OK] DNS flush"
+          # Disable IPv6 on all adapters (can add latency on some paths)
+          Get-NetAdapter | ForEach-Object {
+            try { Disable-NetAdapterBinding -Name $_.Name -ComponentID ms_tcpip6 -ErrorAction SilentlyContinue } catch {}
+          }
 
+          ipconfig /flushdns | Out-Null
           Write-Host "ALL OPTIMIZATIONS APPLIED"
 
       - name: Install + Up Tailscale
@@ -319,11 +353,12 @@ jobs:
             $url = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
             $dst = "$env:TEMP\tailscale.msi"
             Invoke-WebRequest -Uri $url -OutFile $dst
-            Start-Process msiexec.exe -ArgumentList "/i","`"$dst`"","/quiet","/norestart" -Wait
+            Start-Process msiexec.exe -ArgumentList "/i",`"$dst`"","/quiet","/norestart" -Wait
             Remove-Item $dst -Force
           }
           & $ts logout | Out-Null
-          & $ts up --authkey "${{ inputs.ts_authkey }}" --hostname "$env:TS_HOSTNAME" --accept-dns=true --accept-routes=true --reset
+          & $ts up --authkey "${{ inputs.ts_authkey }}" --hostname "$env:TS_HOSTNAME" --accept-dns=true --accept-routes=true --reset --shields-up=false
+          Start-Sleep -Seconds 4
           $ip4 = & $ts ip -4 | Select-Object -First 1
           "TAILSCALE_IP=$ip4" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "Tailscale IPv4: $ip4"
@@ -335,6 +370,7 @@ jobs:
           $derpName = "unknown"
           $derpCode = "unknown"
           $derpLatency = "n/a"
+          $nearestMs = 9999
           $m = [regex]::Match($nc, 'Nearest DERP:\s*([^\s].*?)\s+\(([a-z\-]+)\)')
           if ($m.Success) {
             $derpName = $m.Groups[1].Value.Trim()
@@ -344,10 +380,12 @@ jobs:
           foreach ($line in ($nc -split "`n")) {
             $lm = [regex]::Match($line, '^\s*-\s*(.+?):\s*([0-9]+\.?[0-9]*)\s*ms')
             if ($lm.Success) {
+              $lat = [double]$lm.Groups[2].Value
               $latencies += [pscustomobject]@{
                 Region = $lm.Groups[1].Value.Trim()
-                LatencyMs = [double]$lm.Groups[2].Value
+                LatencyMs = $lat
               }
+              if ($lat -lt $nearestMs) { $nearestMs = $lat }
             }
           }
           $top3 = $latencies | Sort-Object LatencyMs | Select-Object -First 3
@@ -359,8 +397,16 @@ jobs:
           "DERP_CODE=$derpCode" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "DERP_LATENCY=$derpLatency" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "DERP_NEAREST=$derpName ($derpCode)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          Write-Host "Nearest DERP auto-selected: $derpName ($derpCode)"
+          "NEAREST_DERP_MS=$nearestMs" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Nearest DERP auto-selected: $derpName ($derpCode) ~ ${nearestMs}ms"
           Write-Host "Top-3 DERP latency: $derpLatency"
+
+          # Early abort if DERP is already heavy (prevents slow sessions)
+          $maxDerp = [int]$env:MAX_DERP_MS
+          if ($maxDerp -gt 0 -and $nearestMs -gt $maxDerp) {
+            Write-Error "ABORT: Nearest DERP ${nearestMs}ms > max allowed ${maxDerp}ms. Re-run the workflow to get a better runner/path."
+            exit 1
+          }
 
           $exit = $env:TS_EXIT_NODE_INPUT.Trim()
           if ($exit.Length -gt 0) {
@@ -390,6 +436,14 @@ jobs:
           Set-ItemProperty "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name fDenyTSConnections -Value 0
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop" | Out-Null
 
+          # Boost TermService priority
+          try {
+            $tsvc = Get-Process -Name "svchost" -ErrorAction SilentlyContinue | Where-Object {
+              (Get-CimInstance Win32_Service -Filter "ProcessId=$($_.Id)").Name -eq "TermService"
+            }
+            if ($tsvc) { $tsvc.PriorityClass = "High" }
+          } catch {}
+
       - name: RDP Low-Lag Tune (server-side + new-user template)
         shell: pwsh
         run: |
@@ -402,7 +456,7 @@ jobs:
           Set-ItemProperty $rdpTcp -Name "ColorDepth"             -Type DWord -Value $cd
           Set-ItemProperty $rdpTcp -Name "MaxMonitors"            -Type DWord -Value 1
           Set-ItemProperty $rdpTcp -Name "fInheritColorDepth"     -Type DWord -Value 1
-          Set-ItemProperty $rdpTcp -Name "fDisableCdm" -Type DWord -Value 0
+          Set-ItemProperty $rdpTcp -Name "fDisableCdm"            -Type DWord -Value 0
           Set-ItemProperty $rdpTcp -Name "fDisableCpm"            -Type DWord -Value 1
           Set-ItemProperty $rdpTcp -Name "fDisableCursorBlink"    -Type DWord -Value 1
           Set-ItemProperty $rdpTcp -Name "fDisableCursorShadow"   -Type DWord -Value 1
@@ -422,23 +476,24 @@ jobs:
           Set-ItemProperty $rdpTcp -Name "MinEncryptionLevel"     -Type DWord -Value 1
           Set-ItemProperty $rdpTcp -Name "SecurityLayer"          -Type DWord -Value 1
           Set-ItemProperty $rdpTcp -Name "fDisableFontSmoothingCache" -Type DWord -Value 0
-
-          Set-ItemProperty $rdpTcp -Name "MaxIdleTime"          -Type DWord -Value 0
-          Set-ItemProperty $rdpTcp -Name "MaxDisconnectionTime" -Type DWord -Value 0
-          Set-ItemProperty $rdpTcp -Name "MaxConnectionTime"    -Type DWord -Value 0
+          Set-ItemProperty $rdpTcp -Name "MaxIdleTime"            -Type DWord -Value 0
+          Set-ItemProperty $rdpTcp -Name "MaxDisconnectionTime"   -Type DWord -Value 0
+          Set-ItemProperty $rdpTcp -Name "MaxConnectionTime"      -Type DWord -Value 0
 
           $ts = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
           New-Item -Path $ts -Force | Out-Null
           Set-ItemProperty $ts -Name "AVC444ModePreferred"        -Type DWord -Value 0
           Set-ItemProperty $ts -Name "AVCHardwareEncodePreferred" -Type DWord -Value 0
           Set-ItemProperty $ts -Name "bEnumerateHWBeforeSW"       -Type DWord -Value 0
-          Set-ItemProperty $ts -Name "bUseRDPFile"                 -Type DWord -Value 0
-          Set-ItemProperty $ts -Name "fEnableVirtualizedGraphics"  -Type DWord -Value 0
+          Set-ItemProperty $ts -Name "bUseRDPFile"                -Type DWord -Value 0
+          Set-ItemProperty $ts -Name "fEnableVirtualizedGraphics" -Type DWord -Value 0
           Set-ItemProperty $ts -Name "bDisableRemoteDesktopAntiAlias" -Type DWord -Value 1
-          Set-ItemProperty $ts -Name "SelectTransport"            -Type DWord -Value 2
+          Set-ItemProperty $ts -Name "SelectTransport"            -Type DWord -Value 1   # prefer UDP
           Set-ItemProperty $ts -Name "bDisableTSAnimations"       -Type DWord -Value 1
           Set-ItemProperty $ts -Name "MaxUserMonitors"            -Type DWord -Value 1
           Set-ItemProperty $ts -Name "MaxMonitorResolution"       -Type DWord -Value 1
+          Set-ItemProperty $ts -Name "fUseUdpPortRedirector"      -Type DWord -Value 1
+          Set-ItemProperty $ts -Name "SelectNetworkDetect"        -Type DWord -Value 1
 
           Set-Service -Name "TermService" -StartupType Automatic
           Start-Service -Name "TermService"
@@ -495,110 +550,68 @@ jobs:
           Set-ItemProperty $tcpParams -Name "TCPDelAckTicks"     -Type DWord -Value 0
           Set-ItemProperty $tcpParams -Name "TcpAckFreq"         -Type DWord -Value 1
           Set-ItemProperty $tcpParams -Name "DefaultTTL"         -Type DWord -Value 64
-          Set-ItemProperty $tcpParams -Name "KeepAliveTime"      -Type DWord -Value 5000
-          Set-ItemProperty $tcpParams -Name "KeepAliveInterval"  -Type DWord -Value 1000
+          Set-ItemProperty $tcpParams -Name "KeepAliveTime"      -Type DWord -Value 3000
+          Set-ItemProperty $tcpParams -Name "KeepAliveInterval"  -Type DWord -Value 500
+          Set-ItemProperty $tcpParams -Name "TcpMaxDataRetransmissions" -Type DWord -Value 3
           Write-Host "[OK] TCP kernel params"
-
           Write-Host "[OK] RDP low-lag tune applied"
-
 
       - name: FIX RDP File and Clipboard Redirection
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-
-          # Enable drive and file redirection
           $rdpTcp = "HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp"
-
           Set-ItemProperty $rdpTcp -Name "fDisableCdm" -Type DWord -Value 0
           Set-ItemProperty $rdpTcp -Name "fDisableClip" -Type DWord -Value 0
 
-          # Remove Group Policy restrictions
           $policy = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
-
-          if (-not (Test-Path $policy)) {
-              New-Item -Path $policy -Force | Out-Null
-          }
-
+          if (-not (Test-Path $policy)) { New-Item -Path $policy -Force | Out-Null }
           Set-ItemProperty $policy -Name "fDisableCdm" -Type DWord -Value 0
           Set-ItemProperty $policy -Name "fDisableClip" -Type DWord -Value 0
 
-          # Verify settings
           $drive = (Get-ItemProperty $rdpTcp).fDisableCdm
-          $clip = (Get-ItemProperty $rdpTcp).fDisableClip
-
-          Write-Host "========================================"
-          Write-Host "RDP FILE TRANSFER FIX"
-          Write-Host "Drive Redirection: $drive (0 = Enabled)"
-          Write-Host "Clipboard: $clip (0 = Enabled)"
-          Write-Host "========================================"
-
-          if ($drive -ne 0 -or $clip -ne 0) {
-              throw "RDP redirection configuration failed."
-          }
-
+          $clip  = (Get-ItemProperty $rdpTcp).fDisableClip
+          Write-Host "Drive Redirection: $drive (0 = Enabled) | Clipboard: $clip (0 = Enabled)"
+          if ($drive -ne 0 -or $clip -ne 0) { throw "RDP redirection configuration failed." }
           Write-Host "[OK] File and clipboard redirection enabled"
-
-
 
       - name: Tune display + generate tuned RDP file
         shell: pwsh
         run: |
           $ErrorActionPreference = 'SilentlyContinue'
 
-          # ===== TUNABLES =====
+          # ===== TUNABLES — keep these low for max speed =====
           $DESK_W = 1024
           $DESK_H = 768
           $BPP    = 8
-          # ====================
+          # ===================================================
 
-          # --- 1. Lower the runner's own display resolution ---
           try {
             $curW = (Get-CimInstance -ClassName Win32_VideoController).CurrentHorizontalResolution
             $curH = (Get-CimInstance -ClassName Win32_VideoController).CurrentVerticalResolution
             Write-Host "Current display: ${curW}x${curH}"
-
             if ((Get-Command Set-DisplayResolution -ErrorAction SilentlyContinue)) {
               Set-DisplayResolution -Width $DESK_W -Height $DESK_H -Force -ErrorAction SilentlyContinue
             }
-
-            $reg = "HKCU:\Control Panel\Desktop"
-            Set-ItemProperty $reg -Name "Wallpaper" -Value "" -Type String -ErrorAction SilentlyContinue
+            Set-ItemProperty "HKCU:\Control Panel\Desktop" -Name "Wallpaper" -Value "" -Type String -ErrorAction SilentlyContinue
           } catch {
             Write-Host "Display resolution change skipped: $($_.Exception.Message)"
           }
-
           Write-Host "[OK] Display tune attempt done"
 
-          # --- 2. Enforce UDP transport for RDP ---
-          # UDP gives lower latency than TCP for interactive RDP. The
-          # earlier 'RDP Low-Lag Tune' step set SelectTransport=2 (both),
-          # here we explicitly prefer UDP and bump the keepalive.
+          # Prefer UDP hard
           $tsPol = "HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services"
           New-Item -Path $tsPol -Force | Out-Null
-          Set-ItemProperty $tsPol -Name "SelectTransport"        -Type DWord -Value 1  # 1 = prefer UDP
-          Set-ItemProperty $tsPol -Name "SelectNetworkDetect"     -Type DWord -Value 1
-          Set-ItemProperty $tsPol -Name "fUseUdpPortRedirector"   -Type DWord -Value 1
+          Set-ItemProperty $tsPol -Name "SelectTransport"        -Type DWord -Value 1
+          Set-ItemProperty $tsPol -Name "SelectNetworkDetect"    -Type DWord -Value 1
+          Set-ItemProperty $tsPol -Name "fUseUdpPortRedirector"  -Type DWord -Value 1
 
-          # Make sure the UDP listener is allowed through the firewall
           try {
             Enable-NetFirewallRule -DisplayGroup "Remote Desktop" | Out-Null
-            Get-NetFirewallRule -DisplayGroup "Remote Desktop" | ForEach-Object {
-              $rule = $_
-              Get-NetFirewallPortFilter -AssociatedNetFirewallRule $rule | Where-Object {
-                $_.Protocol -eq 'UDP'
-              } | ForEach-Object {
-                try { Enable-NetFirewallRule -Name $rule.Name -ErrorAction SilentlyContinue } catch {}
-              }
-            }
           } catch {}
           Write-Host "[OK] RDP UDP transport preferred"
 
-          # --- 3. Generate the tuned .rdp client file ---
-          # The operator downloads this file and opens it with mstsc.
-          # It encodes every latency-sensitive setting on the client
-          # side: low bpp, no bitmap cache, max compression, no
-          # printers/smartcards/audio capture, autoreconnect on.
+          # Generate aggressive low-latency .rdp
           $rdpPath = "$env:RUNNER_TEMP\bullet.rdp"
           $lines = @(
             "full address:s:$env:TAILSCALE_IP" + ":3389",
@@ -608,13 +621,13 @@ jobs:
             "authentication level:i:0",
             "desktopwidth:i:$DESK_W",
             "desktopheight:i:$DESK_H",
-             "smart sizing:i:1",
-             "dynamic resolution:i:0",
+            "smart sizing:i:1",
+            "dynamic resolution:i:0",
             "session bpp:i:$BPP",
             "compression:i:1",
             "keyboardhook:i:2",
             "audiocapturemode:i:0",
-            "audiomode:i:0",
+            "audiomode:i:2",
             "redirectclipboard:i:1",
             "redirectcomports:i:0",
             "redirectdrives:i:0",
@@ -626,6 +639,7 @@ jobs:
             "displayconnectionid:i:1",
             "use multimon:i:0",
             "bitmapcachepersistenable:i:0",
+            "bitmapcachesize:i:0",
             "disable themes:i:1",
             "disable wallpaper:i:1",
             "disable full window drag:i:1",
@@ -633,17 +647,17 @@ jobs:
             "disable cursor setting:i:1",
             "allow font smoothing:i:0",
             "allow desktop composition:i:0",
-            "videoplaybackmode:i:1",
-            "bandwidthautodetect:i:1",
-            "networkautodetect:i:7",
-            "connection type:i:7",
+            "videoplaybackmode:i:0",
+            "bandwidthautodetect:i:0",
+            "networkautodetect:i:0",
+            "connection type:i:6",
             "autoreconnection enabled:i:1",
             "prompt for credentials on client:i:0",
             "enablecredsspsupport:i:1",
-            "use redirection server name:i:0"
+            "use redirection server name:i:0",
+            "enableworkspacereconnect:i:0"
           )
-          $lines -join "`r`n" | Set-Content -Path $rdpPath -Encoding ASCII -NoNewline
-          Add-Content -Path $rdpPath -Value "`r`n" -Encoding ASCII -NoNewline
+          ($lines -join "`r`n") + "`r`n" | Set-Content -Path $rdpPath -Encoding ASCII
           Write-Host "[OK] RDP file written to: $rdpPath"
           Write-Host "--- contents ---"
           Get-Content $rdpPath | ForEach-Object { Write-Host "  $_" }
@@ -672,15 +686,15 @@ jobs:
           $mins = [int]"${{ env.RUNTIME_MINUTES }}"
           $end = (Get-Date).AddMinutes($mins)
 
-          # ===== TUNABLE THRESHOLDS — one line each =====
-          $LATENCY_GOOD_MS       = 80    # peer considered low-latency at/below this
-          $LATENCY_BAD_MS        = 180   # above this = "heavy" - start nudging
-          $LATENCY_CRITICAL_MS   = 300   # above this = "very heavy" - nudge harder
-          $BAD_STRIKES           = 4     # consecutive heavy pings before optimize
-          $PROBE_EVERY_SEC       = 20    # ping interval (less chatty)
-          $OPTIMIZE_COOLDOWN_SEC = 90    # min seconds between two optimize calls
-          $MAX_OPTIMIZES         = 60    # safety cap per session
-          # =============================================
+          # ===== TUNABLE THRESHOLDS — tighter for always-fast =====
+          $LATENCY_GOOD_MS       = 70
+          $LATENCY_BAD_MS        = 140
+          $LATENCY_CRITICAL_MS   = 220
+          $BAD_STRIKES           = 3
+          $PROBE_EVERY_SEC       = 15
+          $OPTIMIZE_COOLDOWN_SEC = 60
+          $MAX_OPTIMIZES         = 80
+          # ========================================================
 
           $optCount     = 0
           $badStreak    = 0
@@ -739,7 +753,7 @@ jobs:
 
             Write-Host ""
             Write-Host "================================================================"
-            Write-Host "                       ARDP SESSION INFO"
+            Write-Host "                       ARDP SESSION INFO (FAST)"
             Write-Host "  (unlocked: low-latency peer ${latency}ms via $pathKind)"
             Write-Host "================================================================"
             Write-Host "  Peer               : $peerHostName ($peerIP)"
@@ -775,48 +789,38 @@ jobs:
             param()
             $t = [datetime]::Now.ToString('HH:mm:ss')
             Write-Host "[$t] OPTIMIZE #$($optCount): path is heavy, nudging WITHOUT disconnect..."
-            # 1. Force re-discovery of the direct path. This sends probe
-            #    packets to find a better NAT-traversal path. Does NOT
-            #    drop the tunnel. Existing RDP session stays alive.
             try {
-              $probeOut = & $ts ping --until-direct=true --timeout=15s $peerIP 2>&1 | Out-String
+              $probeOut = & $ts ping --until-direct=true --timeout=12s $peerIP 2>&1 | Out-String
               if ($probeOut.Trim()) {
                 Write-Host "    ping-probe result:"
                 Write-Host $probeOut
               }
             } catch {}
 
-            # 2. Burst warm-up: send a handful of small packets to keep
-            #    NAT mapping fresh and prime the path.
-            foreach ($i in 1..5) {
+            foreach ($i in 1..6) {
               try { & $ts ping --until-direct=false --timeout=2s $peerIP 2>$null | Out-Null } catch {}
             }
 
-            # 3. Live TCP tweaks (affect new sockets; existing RDP stays).
             try { netsh int tcp set global autotuninglevel=experimental } catch {}
             try { netsh int tcp set global rss=enabled } catch {}
             try { netsh int tcp set global rsc=enabled } catch {}
             try { netsh int tcp set global ecncapability=enabled } catch {}
-
-            # 4. Flush DNS resolver cache (cheap, harmless).
             try { ipconfig /flushdns | Out-Null } catch {}
 
-            # 5. Re-check latency right after the nudge.
             Start-Sleep -Seconds 2
             $after = Ping-Peer -ts $ts -ip $peerIP
             if ($after -ge 0) {
-              Write-Host "[$t] OPTIMIZE #$($optCount): latency after nudge = ${after}ms (was ${latency}ms)"
+              Write-Host "[$t] OPTIMIZE #$($optCount): latency after nudge = ${after}ms"
             } else {
-              Write-Host "[$t] OPTIMIZE #$($optCount): post-nudge ping failed (path may still be settling)"
+              Write-Host "[$t] OPTIMIZE #$($optCount): post-nudge ping failed (path settling)"
             }
           }
 
-          # --- NAT keepalive job (runs the whole watch) ---
           $keepaliveJob = Start-Job -ScriptBlock {
             param($ts)
             while ($true) {
               try { & $ts ping --until-direct=false --timeout=3s "100.64.0.1" 2>$null | Out-Null } catch {}
-              Start-Sleep -Seconds 20
+              Start-Sleep -Seconds 15
             }
           } -ArgumentList $ts
 
@@ -829,9 +833,9 @@ jobs:
                 continue
               }
 
-              $peerIP      = $peer.IP
-              $p           = $peer.Peer
-              $pathKind    = Get-PathKind -p $p
+              $peerIP       = $peer.IP
+              $p            = $peer.Peer
+              $pathKind     = Get-PathKind -p $p
               $peerHostName = $p.HostName
 
               $latency = Ping-Peer -ts $ts -ip $peerIP
@@ -865,7 +869,7 @@ jobs:
                   Write-Host "[$stamp] HEAVY ${latency}ms via $pathKind - cooldown (${OPTIMIZE_COOLDOWN_SEC}s)"
                 }
                 elseif ($optCount -ge $MAX_OPTIMIZES) {
-                  Write-Host "[$stamp] HEAVY ${latency}ms via $pathKind - optimize cap reached ($MAX_OPTIMIZES) - monitoring only"
+                  Write-Host "[$stamp] HEAVY ${latency}ms via $pathKind - optimize cap reached - monitoring only"
                 }
                 else {
                   Write-Host "[$stamp] HEAVY ${latency}ms via $pathKind ($peerIP) strike $badStreak/$BAD_STRIKES"
@@ -884,4 +888,3 @@ jobs:
             $keepaliveJob | Stop-Job -ErrorAction SilentlyContinue
             $keepaliveJob | Remove-Job -Force -ErrorAction SilentlyContinue
           }
-
