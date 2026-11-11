@@ -390,11 +390,12 @@ jobs:
           }
           $top3 = $latencies | Sort-Object LatencyMs | Select-Object -First 3
           if ($top3) {
-            $parts = @()
-            foreach ($item in $top3) {
-              $parts += "$($item.Region)=$($item.LatencyMs)ms"
+            $joinArr = @()
+            foreach ($t in $top3) {
+              $joinArr += "$($t.Region)=$($t.LatencyMs)ms"
             }
-            $derpLatency = $parts -join " | "
+            $delimiter = " | "
+            $derpLatency = [string]::Join($delimiter, $joinArr)
           }
 
           "DERP_NAME=$derpName" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
